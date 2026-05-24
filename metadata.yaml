@@ -1,0 +1,7 @@
+name: astrbot_plugin_qqkongjian
+display_name: QQ空间
+desc: QQ空间对接插件, 支持查看/点赞/评论说说、自动发说说、AI写说说、表白墙投稿与审核等功能
+help: 略
+version: v1.0.3-single-main-r23
+author: "7"
+repo: https://github.com/204343414/astrbot-plugin-QQKongJian

@@ -1,0 +1,189 @@
+{
+    "manage_group": {
+        "description": "管理群",
+        "type": "string",
+        "hint": "可选。定时自动评论结果如果配置为通知管理员/管理群，会优先发送到此群；不填则私发管理员。"
+    },
+    "pillowmd_style_dir": {
+        "description": "Pillowmd样式目录路径",
+        "type": "string",
+        "hint": "留空则使用插件目录下的 default_style。若填写自定义样式目录，请使用绝对路径或相对插件目录的路径。pillowmd用于渲染说说内容。",
+        "default": ""
+    },
+    "llm": {
+        "description": "LLM模块配置",
+        "type": "object",
+        "hint": "",
+        "items": {
+            "comment_provider_id": {
+                "description": "评论说说用的LLM提供商",
+                "hint": "留空或者填写的提供商不存在时, 则使用当前正在使用的LLM提供商",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider"
+            },
+            "comment_prompt": {
+                "description": "评论说说用的llm提示词",
+                "type": "text",
+                "hint": "强烈建议自行根据Bot人格进行改写, 从而达到更好的效果",
+                "default": "生成一句简短、直接、贴题、犀利的评论, 不要解释、不做自我描述、不分选项"
+            }
+        }
+    },
+    "source": {
+        "description": "数据来源配置",
+        "type": "object",
+        "hint": "",
+        "items": {
+            "ignore_groups": {
+                "description": "忽略的群聊列表",
+                "hint": "若群聊被忽略, Bot将不会从该群聊抽取聊天记录来写说说。建议将信息比较敏感的群聊加入此列表",
+                "type": "list",
+                "default": []
+            },
+            "ignore_users": {
+                "description": "忽略的用户列表",
+                "type": "list",
+                "hint": "Bot在随机触发读说说时, 如果发现用户未开放空间, 则自动将该用户加入忽略列表, 下次不再处理该用户",
+                "default": []
+            },
+            "post_max_msg": {
+                "description": "用于写说说的聊天记录的最大条数",
+                "type": "int",
+                "hint": "过长会爆上下文, 一般几百条足矣",
+                "slider": {
+                    "min": 100,
+                    "max": 1000,
+                    "step": 10
+                },
+                "default": 500
+            }
+        }
+    },
+    "trigger": {
+        "description": "触发配置",
+        "type": "object",
+        "hint": "",
+        "items": {
+            "comment_cron": {
+                "description": "自动评论的触发周期",
+                "type": "string",
+                "hint": "注意此处评论的是bot好友们最近发的说说！ 周期格式、用法同上。例如：“0 8 * * 1” 表示每天 08:00 为周期起点, 实际执行会在该周期内随机偏移。留空表示禁用此功能",
+                "default": "0 8 * * *"
+            },
+            "read_prob": {
+                "description": "聊天时触发评说说的概率",
+                "type": "float",
+                "hint": "群聊消息触发读说说的概率；私聊不会自动触发。你当前常用 0.119 可继续使用。",
+                "slider": {
+                    "min": 0,
+                    "max": 1,
+                    "step": 0.0001
+                },
+                "default": 0.001
+            },
+            "send_admin": {
+                "description": "触发评说说时仅通知管理员",
+                "hint": "打开后, 渲染好的稿件将私发给bot管理员, 而不是直接发到群里",
+                "type": "bool",
+                "default": false
+            },
+            "like_when_comment": {
+                "description": "评说说时是否自动点赞",
+                "hint": "在评论完说说后会自动给此说说点赞",
+                "type": "bool",
+                "default": true
+            },
+            "auto_read_enabled": {
+                "description": "是否开启群聊概率读说说",
+                "type": "bool",
+                "hint": "只在群聊普通消息中按 read_prob 概率触发；私聊不会自动触发。",
+                "default": true
+            },
+            "auto_comment_per_user_daily_limit": {
+                "description": "每天最多自动评论同一个人几次",
+                "type": "int",
+                "hint": "仅限制自动评论（群聊概率触发/定时扫空间），手动 /qq空间_评说说 不受此限制。-1 表示不限制。",
+                "slider": {
+                    "min": -1,
+                    "max": 10,
+                    "step": 1
+                },
+                "default": 3
+            },
+            "auto_comment_per_user_cooldown_minutes": {
+                "description": "自动评论同一个人的最小间隔（分钟）",
+                "type": "int",
+                "hint": "默认 180 分钟，即 3 小时。仅限制自动评论。",
+                "slider": {
+                    "min": 0,
+                    "max": 1440,
+                    "step": 10
+                },
+                "default": 180
+            },
+            "group_show_per_user_daily_limit": {
+                "description": "同一个人在同一个群每天最多展示几张说说卡片",
+                "type": "int",
+                "hint": "同一条说说在同一个群只展示一次；不同群可以各展示一次。-1 表示不限制。",
+                "slider": {
+                    "min": -1,
+                    "max": 20,
+                    "step": 1
+                },
+                "default": 3
+            },
+            "publish_everyone_enabled": {
+                "description": "是否允许所有人使用 /qq空间_发说说",
+                "type": "bool",
+                "hint": "关闭后只有管理员能发。开启后普通用户也可发，但受每日次数限制。",
+                "default": true
+            },
+            "publish_per_user_daily_limit": {
+                "description": "普通用户每天最多让 bot 发几条说说",
+                "type": "int",
+                "hint": "管理员不受此限制。-1 表示不限制。",
+                "slider": {
+                    "min": -1,
+                    "max": 10,
+                    "step": 1
+                },
+                "default": 1
+            },
+            "publish_with_attribution": {
+                "description": "发布时是否自动标注来源用户",
+                "type": "bool",
+                "hint": "开启后会在正文前加“【来自 昵称 的投稿】”。",
+                "default": true
+            },
+            "auto_probe_cooldown_minutes": {
+                "description": "同一用户自动探测空间的最小间隔（分钟）",
+                "type": "int",
+                "hint": "防止 read_prob 较高或群很多时，对同一个人的空间接口反复 F5。只影响群聊概率触发，不影响手动命令和测试触发。",
+                "slider": {
+                    "min": 0,
+                    "max": 120,
+                    "step": 1
+                },
+                "default": 5
+            }
+        }
+    },
+    "cookies_str": {
+        "description": "QQ Cookies",
+        "type": "text",
+        "hint": "选填, 用于维持QQ空间登录态, 留空则自动从 aiocqhttp 客户端获取",
+        "default": ""
+    },
+    "timeout": {
+        "description": "请求超时时间",
+        "type": "int",
+        "hint": "网络请求的超时时间, 单位秒",
+        "slider": {
+            "min": 5,
+            "max": 60,
+            "step": 1
+        },
+        "default": 10
+    }
+}

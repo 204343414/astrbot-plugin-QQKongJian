@@ -1,0 +1,22 @@
+QQ空间单文件 main.py Source Map
+================================
+
+说明：按这些 Source 区块定位，等价于分目录开发。
+
+core/config.py: lines 55-279  | 配置系统：ConfigNode / PluginConfig
+core/model.py: lines 280-454  | 数据模型：Comment / Post
+core/db.py: lines 455-794  | 说说/投稿数据库：PostDB
+core/user_memory.py: lines 795-801  | 用户画像与好感度：UserMemory
+core/qzone/model.py: lines 802-937  | QQ空间基础模型：QzoneContext / ApiResponse
+core/qzone/parser.py: lines 938-1397  | QQ空间响应解析：QzoneParser
+core/qzone/session.py: lines 1398-1513  | QQ空间登录会话：QzoneSession
+core/qzone/utils.py: lines 1514-1555  | QQ空间工具函数：图片下载/归一化
+core/qzone/client.py: lines 1556-1645  | QQ空间HTTP客户端：QzoneHttpClient
+core/qzone/api.py: lines 1646-1973  | QQ空间API封装：QzoneAPI
+core/llm_action.py: lines 1974-2310  | LLM动作：写说说/评论/回复/点赞判断
+core/service.py: lines 2311-2516  | 业务服务层：PostService
+core/sender.py: lines 2517-2688  | 消息发送与渲染：Sender
+core/utils.py: lines 2689-2809  | AstrBot消息工具函数
+core/campus_wall.py: lines 2810-2816  | 表白墙/投稿审核：CampusWall
+core/scheduler.py: lines 2817-2990  | 定时任务：AutoComment
+main.py: lines 2991-3707  | AstrBot插件入口：QzonePlugin
