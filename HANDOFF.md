@@ -1,72 +1,74 @@
 # astrbot_plugin_qqkongjian 交接说明
 
-## 当前目标
-这是 QQ空间插件的单 `main.py` 维护版。当前只保留核心社交功能：
+## 模块结构
+```
+main.py              ← 插件入口 & AstrBot 路由（Star 子类 + 命令装饰器）
+config.py            ← 配置系统（ConfigNode / PluginConfig）
+model.py             ← 数据模型（Comment / Post / QzoneContext / ApiResponse）
+db.py                ← 数据库层（PostDB）
+parser.py            ← QQ空间响应解析（QzoneParser）
+qzone_session.py     ← QQ空间登录会话（QzoneSession）
+qzone_client.py      ← QQ空间HTTP客户端（QzoneHttpClient）
+qzone_api.py         ← QQ空间API封装（QzoneAPI）
+utils.py             ← 通用工具函数（图片下载、消息解析等）
+llm_action.py        ← LLM动作（评论生成/点赞判断/高危内容检测）
+service.py           ← 业务服务层（PostService）
+sender.py            ← 消息发送与渲染（Sender）
+scheduler.py         ← 定时任务（AutoComment / AutoRandomCronTask）
+publish_review.py    ← 投稿审核（PublishReview）⭐ 新增
+```
 
-- `/qq空间_看说说`
-- `/qq空间_评说说`
-- `/qq空间_发说说`
-- `/qq空间_测试触发`（管理员诊断）
-- `/qq空间_自检`（管理员诊断）
-- LLM 工具：`llm_publish_feed`、`llm_visit_friend_qzone`
-- 群聊概率读说说
-- 定时扫好友空间 `AutoComment`
+## 新增功能：投稿审核（publish_review.py）
 
-已物理删除：用户画像/好感度、投稿墙/审核、查看访客、回评、删说说、独立点赞命令、自动发说说 AutoPublish、AI写稿链路。
+### 工作原理
+1. 普通用户发说说 → 走 LLM 审核
+2. 关键词粗筛 → LLM 细审 → 审核通过才发布
+3. 审核通过的内容自动加 "【来自 xxx 的投稿】" 标注
+4. 管理员发说说 → 跳过审核，直接发布
+5. **黑名单机制**：
+   - 违规一次记一次 strike
+   - 累计超过 3 次（BAN_THRESHOLD）→ 永久拉黑
+   - 拉黑用户无法再投稿
+   - 黑名单存储在 `publish_bans.db`（独立的 SQLite 文件）
+   - **黑名单不写在明文规则里**（用户无感知）
 
-## 当前文件
-需要部署/交接的文件：
+### 管理员命令
+- `/qq空间_封投稿 @用户` — 手动封禁用户投稿权限
+- `/qq空间_解封投稿 @用户` — 解封用户投稿权限
+- `/qq空间_审核状态 @用户` — 查看用户投稿违规次数
 
-- `main.py`
-- `_conf_schema.json`
-- `metadata.yaml`
-- `requirements.txt`
-- `default_style/`
-- `logo.png`
-- `MAINTENANCE_LOG.txt`
-- `SOURCE_MAP.txt`
-- `HANDOFF.md`
+### 审核流程
+```
+用户投稿
+  ↓
+黑名单检查（直接拦截已拉黑用户）
+  ↓
+关键词粗筛（极速拦截明显违规）
+  ↓
+LLM 细审（判断封号风险）
+  ↓
+审核通过 → 自动加标注 → 发布
+审核不通过 → 记违规 → 返回拒绝
+```
 
-## 重要维护原则
-1. 不要重新引入多文件 `core/` import。单文件版 `main.py` 顶部不应出现 `from .core...`。
-2. 维护历史写 `MAINTENANCE_LOG.txt`，不要把长篇思路塞回 `main.py`。
-3. 按 `SOURCE_MAP.txt` 定位 `# Source: xxx.py` 区块，等价于分目录维护。
-4. 图片解析部分要参考上游源码优先，不要再全量递归提图污染卡片。当前逻辑是：上游原逻辑先提图；只有没图时才启用兜底。
-
-## 当前最重要未完问题：识图
-现状：
-- 图片数量/去重已修复。
-- `generate_comment()` 会记录 `评论识图输入：image_count=...`。
-- Round 22 已把 QQ 图片下载到本地 cache，再把本地路径传给 `provider.text_chat(image_urls=...)`。
-
-下一步测试重点：
-1. 触发一条带图片的说说评论。
-2. 看日志是否出现：
-   - `LLM识图图片已下载：.../cache/llm_img_xxx.jpg`
-   - `评论识图输入：image_count=1, first=/.../cache/llm_img_xxx.jpg`
-3. 如果仍出现“请上传图片”，说明 AstrBot provider 或当前平台没有正确处理 `image_urls` 的本地路径。下一步应考虑 base64 输入或研究 AstrBot provider 的图片传入方式。
+## 维护原则
+1. **保守修改**：尽量不动已有功能，优先新增模块
+2. **单文件不超千行**：每个 .py 文件保持 500-1000 行以内
+3. **模块职责清晰**：db只管DB，parser只管解析，service只管业务逻辑
+4. **import 保持一致**：所有同级模块用 `from xxx import yyy`（无点前缀）
+5. **维护日志写文件**：不在 main.py 里写长篇注释，而是记录到对应模块
 
 ## QQ空间接口现状
-- `user.qzone.qq.com/proxy/domain/...msglist...` 触发过 WAF 501。
-- `h5.qzone.qq.com/...msglist_v6` 无有效 qzonetoken 时返回“使用人数过多，请稍后再试”。
-- 浏览器里 `window.g_qzonetoken` 为 `undefined`，源码里曾看到 `g_qzonetoken = ''`。
-- 因此群展示目前优先走好友动态流 `get_recent_feeds()`，找不到才 fallback 个人主页接口。
+- `user.qzone.qq.com/proxy/domain/...msglist...` 触发过 WAF 501
+- `h5.qzone.qq.com/...msglist_v6` 无有效 qzonetoken 时返回"使用人数过多"
+- 群展示优先走好友动态流 `get_recent_feeds()`，找不到再 fallback 个人主页接口
 
 ## 当前安全机制
-- `interaction_log` 记录 `space_comment`、`space_like`、`group_show`、`publish`、`auto_probe`。
-- 同一条说说不重复评论。
-- 同一条说说同一群不重复展示。
-- 同一人同群每日展示限制。
-- 同一人自动评论每日限制和冷却。
-- `auto_probe_cooldown_minutes` 防止 read_prob 高时对同一人空间反复 F5。
-- D 档高危内容（想死/想4/想💀等）直接走温柔话术池，不走普通兜底，不点赞。
-- D 档群展示文案：`看到这条有点心疼，大家温柔一点`。
-
-## 当前建议配置
-- `read_prob`: 日常可用 `0.119`，测试不要长期设 `1.0`。
-- `auto_probe_cooldown_minutes`: 默认 5，若 QQ空间风控再调高。
-- `auto_comment_per_user_daily_limit`: 3 或按用户习惯。
-- `auto_comment_per_user_cooldown_minutes`: 180。
-- `group_show_per_user_daily_limit`: 3。
-- `publish_everyone_enabled`: true。
-- `publish_per_user_daily_limit`: 1。
+- `interaction_log` 记录 space_comment、space_like、group_show、publish、auto_probe
+- 同一条说说不重复评论
+- 同一条说说同一群不重复展示
+- 同一人同群每日展示限制
+- 同一人自动评论每日限制和冷却
+- auto_probe_cooldown_minutes 防止 read_prob 高时对同一人空间反复 F5
+- D档高危内容（想死/想4/想💀等）直接走温柔话术池，不走普通兜底，不点赞
+- 投稿审核：关键词粗筛 + LLM细审 + 黑名单机制

@@ -1,22 +1,20 @@
-QQ空间单文件 main.py Source Map
-================================
+# QQ空间插件 模块映射表
 
-说明：按这些 Source 区块定位，等价于分目录开发。
+模块文件                | 职责                           | 行数估计
+-----------------------|-------------------------------|---------
+main.py                | 插件入口 & AstrBot 路由         | ~450
+config.py              | 配置系统                        | ~200
+model.py               | 数据模型 (Post/Comment等)      | ~250
+db.py                  │ 数据库层 (PostDB)              | ~250
+parser.py              │ QQ空间响应解析                  | ~300
+qzone_session.py       │ 登录会话管理                    | ~120
+qzone_client.py        │ HTTP客户端                      | ~80
+qzone_api.py           │ QQ空间API封装                   | ~250
+utils.py               │ 通用工具函数                    | ~120
+llm_action.py          │ LLM动作 (评论/点赞/审核)       | ~250
+service.py             │ 业务服务层                      | ~150
+sender.py              │ 消息发送与渲染                  | ~120
+scheduler.py           │ 定时任务                        | ~150
+publish_review.py      │ 投稿审核 (LLM审 + 黑名单)      | ~200
 
-core/config.py: lines 55-279  | 配置系统：ConfigNode / PluginConfig
-core/model.py: lines 280-454  | 数据模型：Comment / Post
-core/db.py: lines 455-794  | 说说/投稿数据库：PostDB
-core/user_memory.py: lines 795-801  | 用户画像与好感度：UserMemory
-core/qzone/model.py: lines 802-937  | QQ空间基础模型：QzoneContext / ApiResponse
-core/qzone/parser.py: lines 938-1397  | QQ空间响应解析：QzoneParser
-core/qzone/session.py: lines 1398-1513  | QQ空间登录会话：QzoneSession
-core/qzone/utils.py: lines 1514-1555  | QQ空间工具函数：图片下载/归一化
-core/qzone/client.py: lines 1556-1645  | QQ空间HTTP客户端：QzoneHttpClient
-core/qzone/api.py: lines 1646-1973  | QQ空间API封装：QzoneAPI
-core/llm_action.py: lines 1974-2310  | LLM动作：写说说/评论/回复/点赞判断
-core/service.py: lines 2311-2516  | 业务服务层：PostService
-core/sender.py: lines 2517-2688  | 消息发送与渲染：Sender
-core/utils.py: lines 2689-2809  | AstrBot消息工具函数
-core/campus_wall.py: lines 2810-2816  | 表白墙/投稿审核：CampusWall
-core/scheduler.py: lines 2817-2990  | 定时任务：AutoComment
-main.py: lines 2991-3707  | AstrBot插件入口：QzonePlugin
+所有模块保持 500 行以内，职责单一，方便维护。

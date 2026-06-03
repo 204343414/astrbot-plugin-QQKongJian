@@ -1,483 +1,60 @@
-QQ空间插件单 main 维护日志
+QQ空间插件模块化维护日志
 ========================
 
 项目目标
 --------
-用户希望最终部署包尽量只保留：
-- main.py
-- _conf_schema.json
-- metadata.yaml
-- requirements.txt
-- default_style/
-- logo.png
-- MAINTENANCE_LOG.txt（从 Round 2 起新增，便于未来 LLM 理解历史）
+从 Round 24 起，项目从单 main.py 拆分为多模块。每个模块文件保持 500-1000 行以内。
 
 维护原则
 --------
-1. 慢一点，宁可少改，不要一次性大改。
-2. 每次原子修改都说明为什么改。
-3. 涉及可能刷屏/反复评论/自动发消息的功能，默认从安全角度审查。
-4. 用户不懂代码，最终交付物要尽量可直接覆盖部署。
-5. main.py 顶部只放简短 AGENT NOTE；详细历史写在本文件，避免 main.py 注释无限膨胀。
-
-Round 1 - 2026-05-23
---------------------
-目标：把原多文件插件合并成单 main.py。
-处理：
-- 合并 core/config.py、core/model.py、core/db.py、core/user_memory.py、core/qzone/*.py、core/llm_action.py、core/service.py、core/sender.py、core/utils.py、core/campus_wall.py、core/scheduler.py、原 main.py。
-- 没有合并 core/post.py，因为它与 core/model.py/core/db.py 有重复 Post/PostDB 实现，且当前运行链路没有引用它。
-- 没有合并 core/qzone/__init__.py，因为单文件不需要包级转发 import。
-- 删除相对 import。
-- 所有普通命令改成 qq空间_XXX，用户侧一般使用 /qq空间_XXX。
-- 修复 view_user_profile 原来在 QzonePlugin 类外的问题。
-- 修复 UserMemory.update_profile/add_favor/decay_favor 原来缩进异常的问题。
-- UserMemory.initialize 增加轻量数据库迁移，避免旧 user_memory 表缺 favor 等列导致查看画像失败。
-检查：
-- python3 -m py_compile main.py 通过。
-- 无遗留相对 import。
-- 无重复顶层 class/function。
-
-Round 2 - 2026-05-23
---------------------
-触发原因：
-AstrBot 安装失败：metadata.yaml 中 name 不是合法模块名称。
-原值：astrbot-plugin-QQKongJian
-问题：连字符 '-' 不是合法 Python 标识符字符。
-处理：
-- metadata.yaml: name 改为 astrbot_plugin_qqkongjian。
-- metadata.yaml: version 改为 v1.0.1-single-main-r2，便于区分测试包。
-- main.py 顶部追加 Round 2 简短说明。
-- 新增 MAINTENANCE_LOG.txt。
-注意：
-- 用户测试后如果提示目录 astrbot_plugin_qqkongjian 已存在，需要先删除 AstrBot 插件目录里的残留失败安装目录，再重新安装。
-
-待办/风险
----------
-1. 重点审查防刷屏：自动评论、概率读说说、随机好友互动、定时任务。
-2. 考虑增加全局安全开关/冷却时间/每轮最大互动数量/每日上限。
-3. 画像和好感度逻辑仍需实机验证。
-4. 如果后续砍功能，优先砍高风险自动行为，而不是手动命令。
-
-Round 3 - 2026-05-23
---------------------
-触发原因：
-- AstrBot 加载失败：metadata.author 是整数 7，AstrBot 调用 lower() 时抛出 'int' object has no attribute 'lower'。
-- 用户要求先砍功能，后续再加功能；并强调 bot 体量较高，刷屏/反复评论是重大事故。
-
-处理：
-- metadata.yaml: author 从 7 改为 "7"。
-- metadata.yaml: version 改为 v1.0.2-single-main-r3。
-- main.py: initialize 不再启动 AutoComment / AutoPublish。
-- main.py: prob_read_feed 保留 client 初始化后立即 return，关闭监听消息后的概率自动读空间/评论。
-- main.py: llm_publish_feed 入口直接返回安全模式提示，暂停 LLM 自主发说说。
-- main.py: llm_visit_friend_qzone 入口直接返回安全模式提示，暂停 LLM 自主访问空间/评论/点赞。
-
-保留：
-- 手动 slash 命令仍保留，例如 /qq空间_看说说、/qq空间_评说说、/qq空间_发说说。
-
-后续建议：
-- 等插件能稳定加载后，再考虑砍掉表白墙/投稿审核等不需要的手动功能。
-- 如果恢复自动功能，必须先做冷却、每日上限、持久化 interaction_log。
-
-Round 4 - 2026-05-23
---------------------
-触发原因：
-- 用户希望保留“概率读说说”的社交台阶功能：群友自己发空间不好意思主动分享，bot 概率读空间并发到群里可以帮对方自然被看见。
-- 用户要求先砍功能，明确要砍“稿”相关功能。
-
-处理：
-- 恢复 prob_read_feed，不再直接 return。
-- 给 prob_read_feed 加硬编码安全阀：
-  1. read_prob <= 0 不触发；
-  2. 忽略用户不触发；
-  3. 随机概率未命中不触发；
-  4. 全局最短间隔 30 分钟；
-  5. 每日概率自动互动上限 5 次；
-  6. 锁外、锁内双重检查，降低并发消息重复触发风险。
-- 只有真实评论并发送成功后，才累计每日次数和冷却时间。
-- 砍掉以下命令注册入口：
-  /qq空间_写说说、/qq空间_写稿、/qq空间_投稿、/qq空间_匿名投稿、/qq空间_撤稿、/qq空间_看稿、/qq空间_过稿、/qq空间_拒稿。
-
-说明：
-- 本轮没有删除 CampusWall 类和相关函数体，只取消命令注册，避免大范围删除导致误伤。
-- 如果后续确认彻底不用表白墙，可以再删除 CampusWall 类、Post.status=pending 审核链路和相关数据库语义。
-
-Round 5 - 2026-05-23
---------------------
-触发原因：
-- 用户希望 main.py 里不再堆维护注释，后续统一写 MAINTENANCE_LOG.txt。
-- 多个命令提示 unable to open database file。
-
-判断：
-- 插件安装名已变为 astrbot_plugin_qqkongjian，但 PluginConfig 仍使用 StarTools.get_data_dir("astrbot_plugin_qzone")。
-- 单 main 版默认样式路径也仍指向旧目录 astrbot_plugin_qzone。
-- 虽然 cache_dir.mkdir(parents=True) 理论上会创建父目录，但为了避免不同 AstrBot 版本/路径策略导致 SQLite 父目录不存在，本轮显式创建 data_dir。
-
-处理：
-- main.py: self.data_dir 改为 StarTools.get_data_dir("astrbot_plugin_qqkongjian")。
-- main.py: 在设置 cache_dir 前显式 self.data_dir.mkdir(parents=True, exist_ok=True)。
-- main.py: 默认样式路径改为 Path(__file__).resolve().parent / "default_style"，适配单 main 部署包。
-- main.py: 删除所有 AGENT NOTE 维护注释，后续维护历史统一放本文件。
-
-说明：
-- 如果 AstrBot 机器上旧的失败数据目录权限异常，仍需检查 /AstrBot/data 相关目录权限。
-- LLM 工具返回“安全模式”是 Round 3 主动暂停 llm_publish_feed / llm_visit_friend_qzone，不是工具没加载。
-
-Round 6 - 2026-05-23
---------------------
-触发原因：
-- 用户反馈 /qq空间_看说说 能返回内容，但没有生成 pillowmd 卡片，只返回了 Markdown 纯文本。
-- 用户反馈 LLM 主动调用工具被“安全模式”挡住。
-
-判断：
-- _conf_schema.json 中 pillowmd_style_dir 默认值仍是旧路径 data/plugins/astrbot_plugin_qzone/default_style。
-- 如果配置已保存旧路径，main.py 会优先用该路径，导致样式加载失败并退回纯文本。
-- send_post/send_msg 使用 Image(str(img_path))，改为与 _post_to_seg 一致的 Image.fromFileSystem 更稳。
-- LLM 访问空间工具原本被 Round 3 完全拦截；考虑安全性，本轮只恢复“只读查看”，不恢复评论/点赞。
-
-处理：
-- main.py: PluginConfig 对 pillowmd_style_dir 做校验：空值、旧插件名路径、路径不存在时回退到 main.py 同级 default_style。
-- main.py: Sender._load_renderer 增加成功/失败日志。
-- main.py: send_post/send_msg 渲染失败时记录错误并降级纯文本。
-- main.py: send_post/send_msg 改用 Image.fromFileSystem。
-- main.py: llm_visit_friend_qzone 改成只读工具：查询最新说说、发送卡片、不评论、不点赞。
-- _conf_schema.json: pillowmd_style_dir 默认值改为空字符串，避免新安装继续写入旧路径。
-
-仍保持：
-- llm_publish_feed 继续安全模式暂停，因为自主发说说风险高于只读查看。
-
-Round 7 - 2026-05-23
---------------------
-目标：
-先做最重要、最简单的结构改造：把“空间互动”和“群展示”拆开，先保证不重复评论、不重复展示，并把核心功能砍到 看/评/发。
-
-处理：
-- main.py: PostDB 新增 interaction_log 表，用于持久化记录 space_comment、space_like、group_show、publish 等行为。
-- main.py: interaction_log 增加索引，支持按 tid/action、target_uin/action/time、group_id/action/time 查询。
-- main.py: 新增 PostDB.log_interaction / has_interaction / count_interactions_since / last_interaction_ts。
-- main.py: 概率读说说只在群聊触发；私聊普通消息不触发。AstrBot 中 event.get_group_id() 群聊返回群号，私聊返回 None/空。
-- main.py: 群聊概率触发时，查询该群友最新说说；如果同一条说说已在同一群展示过，则不再展示；不同群可以各展示一次。
-- main.py: 同一个人在同一个群每天最多展示 3 张说说卡片。
-- main.py: 空间自动评论限制为同一人每天最多 3 次，且同一人间隔至少 3 小时。
-- main.py: 已经评论过的说说不会重复评论，但如果没在当前群展示过，仍可展示到群里。
-- main.py: 群展示话术保持自然：“触发读说说：已评论并点赞/已评论”，不暴露“之前评论过”“不宜点赞”等程序感表达。
-- main.py: AutoComment 重新启用，沿用 comment_cron；它只负责定时扫空间评论/点赞，不负责群展示。
-- main.py: 独立命令砍到只剩 /qq空间_看说说、/qq空间_评说说、/qq空间_发说说。
-- main.py: /qq空间_发说说 去掉管理员限制，普通用户可用；普通用户默认每天最多 1 条，管理员不受限。
-- main.py: llm_publish_feed 恢复，可自然语言发说说，但同样受每日次数限制。
-- _conf_schema.json: 新增 auto_read_enabled、auto_comment_per_user_daily_limit、auto_comment_per_user_cooldown_minutes、group_show_per_user_daily_limit、publish_everyone_enabled、publish_per_user_daily_limit、publish_with_attribution。
-
-刻意暂缓：
-- D 档/自伤风险关键词粗筛与温柔话术池还没写入代码，留到 Round 8。
-- LLM 自然语言评论工具还没新增，先保证空间互动/群展示拆分稳定。
-- 没有做单群全局冷却；用户明确希望不要全局冷却。
-
-测试重点：
-1. 插件能否加载并自动创建 interaction_log 表。
-2. /qq空间_看说说 是否正常出卡片。
-3. /qq空间_发说说 普通用户是否能发，第二次是否被每日限制拦住。
-4. 群聊普通消息按 read_prob 触发时，是否能展示卡片。
-5. 同一条说说在同一群第二次不展示，在另一个群可以展示。
-6. 已评论过的说说不会重复评论。
-
-Round 8 - 2026-05-23
---------------------
-触发原因：
-- 用户日志显示 AutoComment 在 LLM Provider 403/suspended 时会对多条说说连续报错。
-- 用户测试 read_prob=1.0 时，没有出现重复评论重大事故，但发现某些群聊触发没有展示自己的说说。
-
-判断：
-- 群聊概率读说说的核心目标是“给台阶/展示”，不能因为 LLM 评论失败就完全不发群卡片。
-- 原 prob_read_feed 中 _auto_comment_if_allowed 如果评论生成失败会抛出，导致群展示也被跳过。
-- 原 prob_read_feed 遇到 Empty 也会 append_ignore_users，可能在用户刚开放空间或接口抽风时把用户长期忽略，误伤概率触发。
-
-处理：
-- main.py: _auto_comment_if_allowed 现在捕获评论失败，返回 (False, False)，不再阻断群展示。
-- main.py: 群聊概率读说说现在根据真实状态生成自然文案：
-  - 本次评论成功：触发读说说：已评论/已评论并点赞。
-  - 之前已评论但本次不重复评论：仍使用自然“已评论/已评论并点赞”文案，不暴露内部状态。
-  - LLM 故障或受限导致无法评论且之前也没评论：触发读说说：搬来给大家看看。
-- main.py: prob_read_feed 不再因为 Empty 把用户加入 ignore_users，只在“不存在”时加入，降低误伤。
-- main.py: AutoComment 遇到 LLM 调用失败、403、Permission denied、suspended 时中止本轮，避免一轮对多条说说连续报错。
-
-说明：
-- LLM 欠费/供应商停用时，定时评论会停止本轮；群聊概率展示仍可继续发挥“给台阶”作用。
-- D 档风险分词和温柔话术池仍未写入，留到下一轮。
-
-Round 9 - 2026-05-23
---------------------
-触发原因：
-- 用户反馈 Gemini 对洛克王国截图生成了极其人机的评论，自称 gemini-3.1-flash-lite-preview，还让用户提供帖子内容/链接。
-- 用户询问是否能有“全套流程自检指令”，最好私聊 bot 就能检查关键链路。
-
-处理：
-- main.py: LLMAction 新增 sanitize_comment_output，用于拦截模型自述、平台名、AI身份、请提供链接/帖子内容、过长解释等明显不适合发到QQ空间的评论。
-- main.py: LLMAction 新增 fallback_comment，LLM 输出不合格时使用本地短句兜底，避免把模型异常内容发到别人空间。
-- main.py: generate_comment 对图片说说/无文字说说补充明确上下文，避免 LLM 以为用户没给帖子内容。
-- main.py: generate_comment 增加硬性要求：只输出一句普通朋友式短评论，不自称模型，不提平台/链接/内容缺失，不解释，不超过18个汉字。
-- main.py: 新增管理员命令 /qq空间_自检。该命令不评论、不点赞、不发说说，只检查：插件响应、数据目录、数据库表、pillowmd渲染器、QQ空间登录态、LLM评论dry-run、评论消毒器、关键配置。
-
-说明：
-- /qq空间_自检 是临时/长期均可保留的管理员诊断命令，不属于普通用户功能。
-- 自检中的 LLM dry-run 只调用模型生成测试评论，不会发到QQ空间。
-- 如果 LLM 欠费/403，自检会显示 LLM评论dry-run 失败。
-
-Round 10 - 2026-05-23
----------------------
-触发原因：
-- 用户指出普通兜底评论在“我想💀”这类高危内容下会灾难性翻车，例如“这画面感来了”。
-- 用户希望继续砍掉用不上的用户画像/好感度链路。
-- 用户提出单 main 虽方便部署，但维护时需要像分目录一样按 Source 区块定位。
-
-处理：
-- main.py: LLMAction 新增 is_critical_risk_content，粗筛“想死/想4/想💀/不想活/跳楼/割腕/吞药/遗书”等高危内容。
-- main.py: LLMAction 新增 critical_fallback_comment，包含多句温柔、保守、不热线、不说教、不玩梗的话术。
-- main.py: fallback_comment 在普通兜底前优先检查高危内容，命中时绝不使用“这图有点东西/画面感来了”这类普通评论。
-- main.py: generate_comment 在命中高危内容时直接返回温柔话术池，不再调用 LLM，避免 LLM 欠费/失败/误判导致奇怪输出。
-- main.py: 用户画像/好感度链路停用：QzonePlugin 不再初始化 UserMemory，不再传给 LLMAction；PostService.comment_posts 不再更新画像/好感度。
-- 新增 SOURCE_MAP.txt：列出单文件 main.py 中每个 # Source 区块的行号范围，后续按区块维护，接近分目录开发体验。
-
-说明：
-- UserMemory 类和已取消注册的查看画像函数仍保留在 main.py 里作为死代码，暂不物理删除，避免大规模删除误伤；但运行链路已经不再使用。
-- “插件工具提示所属插件被禁用”不是函数本身的错误，通常是 AstrBot 面板里插件被禁用或插件曾加载失败后工具未重新激活。需要先确认插件启用并重载成功，再到函数工具列表重新启用工具。
-
-Round 11 - 2026-05-23
----------------------
-触发原因：
-- 用户反馈 read_prob=1.0 时仍不方便稳定测试群概率展示与 D 档群展示文案。
-- 日志显示 LLM 点赞判断对图片/内容不足时输出“请提供具体的说说内容”，虽然最终不赞，但日志和逻辑都很人机。
-
-处理：
-- main.py: should_like 重写为严格“是/否”判断；输出不是以“是”或“否”开头时，一律默认不赞并记录 warning。
-- main.py: should_like 对图片说说传入 image_urls=post.images；内容为空时补充“图片说说/无文字说说”上下文。
-- main.py: should_like 命中高危内容时直接不赞，不再调用 LLM。
-- main.py: 新增 _show_latest_post_in_group，统一处理群展示：查最新说说、判断 D 档、尝试评论、发群卡片、记录 group_show。
-- main.py: prob_read_feed 改为调用 _show_latest_post_in_group，避免重复逻辑。
-- main.py: 新增管理员命令 /qq空间_测试触发，在群里强制执行一次群展示流程，不受 read_prob 和 group_show 记录限制，方便测试 D 档文案；不会重复评论，因为评论仍受 space_comment 防重限制。
-- main.py: D 档群展示文案接入 _show_latest_post_in_group：看到这条有点心疼，大家温柔一点。
-
-说明：
-- /qq空间_测试触发 是诊断命令，不是普通用户功能；用于测试“为什么概率没触发”和 D 档展示文案。
-- 如果插件被禁用，AstrBot 工具列表会提示工具所属插件被禁用；需要先启用插件并确认加载无报错，再启用工具。
-
-Round 12 - 2026-05-23
----------------------
-触发原因：
-- 用户确认自己发了“我想💀️”且设置 bot 可见，但 /qq空间_测试触发 只返回泛化失败，无法判断是权限、详情解析、列表读取、目标 ID 还是 no_self 过滤问题。
-- 用户指出 _conf_schema.json 还没完全跟着砍功能清理。
-
-处理：
-- main.py: _show_latest_post_in_group 增强测试模式失败原因输出。force=True 时会返回 target_id、group_id、bot_self_id、详情读取错误、列表读取错误。
-- main.py: _show_latest_post_in_group 先尝试 with_detail=True；失败或为空时 fallback 到 with_detail=False，避免详情接口/解析失败导致测试完全不可用。
-- main.py: 测试触发 force=True 时 no_self=False，允许测试目标是 bot 自己或与 bot self_id 判断边界不清的账号。
-- main.py: /qq空间_测试触发 不再额外发泛化失败句，避免覆盖详细错误。
-- _conf_schema.json: 删除已停用的 show_name；把 publish_cron 标记为当前停用；更新 manage_group 说明。
-
-下一步：
-- 请再次在群里执行 /qq空间_测试触发 @目标用户，把详细失败原因贴回来。
-- 如果 fallback 列表读取成功但详情失败，说明 get_detail/parse detail 有问题；如果两者都失败，重点看 target_id、权限和 Qzone 接口返回。
-
-Round 13 - 2026-05-23
----------------------
-触发原因：
-- /qq空间_测试触发 详情和列表读取都失败，错误为 Empty strings are not legal JSON5。
-- 这说明 Qzone 接口返回了空字符串，原解析器把空字符串交给 json5 解析，导致错误不透明。
-
-处理：
-- main.py: QzoneContext 现在保留完整 raw_cookies，而不是只传 uin/skey/p_skey。部分 QQ空间接口可能依赖额外 cookie。
-- main.py: QzoneHttpClient.request 遇到空响应时，先 invalidate/login 重试一次。
-- main.py: 重试后仍为空时，抛出带诊断信息的 RuntimeError：status、content_type、url、params、cookie_keys。
-- main.py: Qzone 响应解析失败时，抛出 status、content_type、url、错误和响应前 300 字符。
-
-说明：
-- 公开搜索没有找到针对该 QQ空间接口空响应的稳定结论；这类接口属于非正式接口，最好靠运行时诊断定位。
-- 下一步请再次运行 /qq空间_测试触发 @目标，把新的 Qzone接口空响应详细信息贴回来。
-
-Round 14 - 2026-05-23
----------------------
-触发原因：
-- /qq空间_测试触发 返回 status=501，snippet 显示跳转 waf.tencent.com/501page.html，说明 user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6 被腾讯 WAF 拦截。
-
-参考：
-- 搜到的 qqzone_spider 项目使用 h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6 获取说说列表，并带 cgi_host、inCharset、outCharset、notice、format=jsonp 等参数。
-
-处理：
-- main.py: QzoneAPI.LIST_URL 从 user.qzone.qq.com/proxy/domain/... 切换为 h5.qzone.qq.com/proxy/domain/...。
-- main.py: get_feeds 参数 format 从 json 改为 jsonp，并补充 cgi_host、inCharset、outCharset、notice。
-- main.py: 默认 headers 去掉固定 Host=user.qzone.qq.com，避免请求 h5.qzone.qq.com 时 Host 与 URL 域名不一致，交给 aiohttp 自动设置 Host。
-
-测试：
-- 重新运行 /qq空间_测试触发 @目标。若不再出现 waf.tencent.com/501page，说明 WAF 绕过成功。
-
-Round 15 - 2026-05-23
----------------------
-触发原因：
-- Round 14 绕过 WAF 后，h5 msglist 接口返回“使用人数过多，请稍后再试”。公开 QQ空间爬虫资料显示 h5 msglist_v6 通常需要 qzonetoken 参数。
-
-处理：
-- main.py: QzoneContext 增加 qzonetoken 字段。
-- main.py: QzoneSession.login 后尝试访问 https://user.qzone.qq.com/{uin}，从页面中的 window.g_qzonetoken 提取 token。
-- main.py: QzoneAPI.get_feeds 如果拿到 qzonetoken，则把 qzonetoken 加入 h5 msglist_v6 参数。
-- main.py: 空响应诊断里增加 qzonetoken 有/无。
-
-限制：
-- qzonetoken 有时是混淆 JS 表达式，当前只支持明文或简单 return 字符串提取。若日志显示“检测到 g_qzonetoken 但未能直接提取”，后续再考虑实现 JS 表达式求值或别的提取方式。
-
-测试：
-- 重载后先看日志“登录成功，uin=..., qzonetoken=有/无”。
-- 再运行 /qq空间_测试触发 @目标。
-
-Round 16 - 2026-05-23
----------------------
-触发原因：
-- 用户反馈 qzonetoken 仍为“无”，h5 msglist_v6 继续返回“使用人数过多，请稍后再试”。
-- 复查代码发现 qzonetoken 提取正则过度转义，实际匹配的是 window\.g_qzonetoken 而不是 window.g_qzonetoken。
-
-处理：
-- main.py: 修正 qzonetoken 提取正则，从 r'window\\.g_qzonetoken' 改为 r'window\.g_qzonetoken' 语义，即匹配页面里的 window.g_qzonetoken。
-- main.py: qzonetoken 提取失败时输出页面前 160 字符，便于判断是登录页、风控页、空页还是未知页面。
-- main.py: /qq空间_自检 的 QQ空间登录态显示 qzonetoken 有/无。
-
-测试：
-- 重载后看日志：登录成功，uin=..., qzonetoken=有/无。
-- 若仍为无，请看是否出现“检测到 g_qzonetoken 但暂不能求值，表达式片段：...”，那说明下一步要实现混淆表达式求值。
-
-Round 17 - 2026-05-23
----------------------
-触发原因：
-- 用户浏览器里 window.g_qzonetoken 为 undefined，源码只有 g_qzonetoken = ''。
-- 原插件也返回“使用人数过多，请稍后再试”，说明个人主页 msglist_v6 当前在该环境下不可依赖。
-- 用户希望优先按性价比最高路线推进，避免继续死磕 qzonetoken。
-
-处理：
-- main.py: 新增 _find_latest_post_for_group_show。
-- main.py: 群展示/测试触发现在优先调用好友动态流 get_recent_feeds，在最近 30 条好友动态里查找 target_id 的最新说说。
-- main.py: 好友动态流找不到时，才 fallback 到个人主页详情接口和个人主页列表接口。
-- main.py: /qq空间_测试触发 失败时会显示好友动态流是否命中、最近解析到的 uin 列表，以及个人主页接口错误。
-
-意义：
-- 群展示逻辑更接近真人刷好友动态，而不是精准爬个人主页。
-- 如果 QQ 空间个人主页接口继续要求 qzonetoken 或被风控，核心“群友发言 -> 搬好友动态到群里给台阶”的功能仍有机会工作。
-
-测试：
-- 在群里执行 /qq空间_测试触发 @目标。
-- 如果失败，请看“最近解析到的uin”里有没有目标 QQ。没有则说明好友动态流当前没刷到 TA 的最新说说。
-
-Round 18 - 2026-05-23
----------------------
-触发原因：
-- 用户确认 read_prob=1.0 像对 QQ空间 F5，可能触发风控。
-- 用户担心 ignore_users 命中后逻辑不自愈，好友关系变化后仍被忽略。
-- 用户反馈图片说说评论有时像没识图，例如王者段位图配文“真好”，bot 反问“发生了什么有趣的事吗”。
-
-处理：
-- main.py: 新增 auto_probe 记录。群聊概率触发在真正查询空间前，先检查同一 target_uin 最近是否已经探测过。
-- _conf_schema.json: 新增 auto_probe_cooldown_minutes，默认 5 分钟。用于防止 read_prob 太高时对同一人的空间接口反复 F5。
-- main.py: 客户端可用后，启动期尝试把已经成为好友的 QQ 从 ignore_users 移除一次。
-- main.py: AutoComment 跳过 ignore_users，避免定时任务绕过忽略列表。
-- main.py: 评论输出消毒器拒绝反问式评论（包含 ?、？、吗），避免“发生了什么有趣的事吗”这类没情绪价值的回复。
-- main.py: generate_comment 如果有图片，显式告诉 LLM 图片数量，并要求必须结合图片内容评论、看不清也不要反问。
-- main.py: fallback_comment 只要有图片就优先使用图片向短句池，而不是只有纯图片才使用。
-
-说明：
-- auto_probe_cooldown_minutes 不等于群全局冷却；它只限制“同一个人”被概率触发反复探测，符合防 F5 目标。
-- 手动 /qq空间_看说说、/qq空间_评说说、/qq空间_测试触发 不受 auto_probe 冷却影响。
-
-Round 19 - 2026-05-23
----------------------
-触发原因：
-- 用户怀疑插件根本没有把说说图片传给 LLM。样本：猫娘拿垃圾桶图片，bot 只说“看着很不错，蛮有意思的”；王者段位图配文“真好”，bot 反问“发生了什么有趣的事吗”。
-
-处理：
-- main.py: 新增 _normalize_image_url / _normalize_image_urls，统一清洗图片 URL：html unescape、补全 //、http 转 https、去重、过滤空值。
-- main.py: QzoneParser.parse_feeds / parse_recent_feeds 在构造 Post 时清洗 images，避免 &amp;、协议相对 URL、None 混入。
-- main.py: generate_comment 调用 LLM 前再次清洗 post.images，并记录日志：评论识图输入 image_count 和 first URL 前 160 字符。这样可以确认到底有没有把图片传给模型。
-- main.py: 图片评论 prompt 加强：有图必须识别具体元素（角色、动物、游戏段位、物品、动作、文字），禁止只说不错/有意思/很好看，看不清也不要反问。
-- main.py: 评论消毒新增“反问”过滤已有；本轮新增 is_generic_image_comment，图片评论如果仍然输出“看着很不错/蛮有意思/挺不错”等泛泛短句，会被丢弃走兜底。
-
-下一步判断：
-- 如果日志出现“评论识图输入：image_count=0”，说明解析链路没有拿到图片。
-- 如果 image_count>0 且 URL 正常，但模型仍不识图，说明 provider/image_urls 能力或 QQ 图片 URL 外部可访问性有问题。
-- 若 URL 是 qpic/m.qpic 且模型侧访问受限，后续可能需要改成下载图片后转存/本地上传给 provider，而不是传 URL。
-
-Round 20 - 2026-05-23
----------------------
-触发原因：
-- 用户反馈图片说说仍然被评论成“请上传具体的图片”，说明 LLM 很可能没有收到图片。
-- 用户未看到“评论识图输入”日志，说明 post.images 很可能为空，问题更可能在 Qzone 图片解析链路，而不是模型提示词。
-
-处理：
-- main.py: 新增更激进的图片 URL 提取：
-  1. 从 Qzone JSON 对象递归查找 key 中含 url/pic/image/cover 的 qpic/photo 图片 URL。
-  2. 从好友动态 HTML 所有 img 标签提取 src/data-src/data-original/data-url/data-img/data-pic/origin-src/origin-url/url。
-  3. 从 style=background-image:url(...) 提取图片。
-  4. 从 HTML 原文中兜底扫描 qpic/photo URL。
-- main.py: 过滤 qzonestyle/emotion/qlogo/face/emoji/sprite/icon，避免把表情、头像、样式图传给 LLM。
-- main.py: parse_feeds / parse_recent_feeds 构造 Post 前统一清洗并去重图片 URL。
-- main.py: generate_comment 即使 image_count=0 也会打 warning，输出 tid 和 text_preview，方便确认是“没解析到图”还是“传了图但模型没看”。
-
-下一步判断：
-- 若日志为 image_count=0：继续修解析，需要看该说说来自 parse_feeds 还是 parse_recent_feeds，以及原始 feed/msg 结构。
-- 若 image_count>0 但模型仍说请上传图片：说明 AstrBot provider 或 Gemini 平台没有成功读取 image_urls，后续需要改成下载图片后用平台支持的图片组件/本地文件方式传图。
-
-Round 21 - 2026-05-23
----------------------
-触发原因：
-- 用户反馈 Round 20 后卡片里出现重复图片。复查确认是激进兜底提图把 HTML、JSON、style 里的同一张图不同 URL 形态都塞进 post.images。
-- 用户要求参考上游原源码，不要继续瞎猜。
-
-处理：
-- main.py: parse_feeds 回到上游原逻辑优先：先读 msg.pic / video 封面；只有完全没图时才递归兜底。
-- main.py: parse_recent_feeds 回到上游原逻辑优先：先读 div.img-box img / video 封面；只有完全没图时才启用 HTML/JSON 激进兜底。
-- main.py: _normalize_image_urls 增加 _image_dedupe_key，按 QQ 图片主体路径去重，去掉同一资源不同 query 参数导致的重复卡片。
-
-意义：
-- 卡片展示恢复接近上游源码的稳定行为。
-- 兜底提图仍保留，但只在上游原逻辑完全没抓到图时启用，用于兼容结构变化。
-- 识图链路仍会打 image_count 日志，便于判断是否传图给 LLM。
-
-Round 22 - 2026-05-23
----------------------
-触发原因：
-- 图片数量已恢复正常，但模型仍输出“请上传具体的图片”，说明 post.images 可能已存在，但远程 QQ 图片 URL 没有被 provider/Gemini 成功读取。
-- AstrBot 文档说明 image_urls 支持网络链接、本地图片路径、base64。因此最稳的下一步是把 QQ 图片下载到本地 cache，再把本地路径交给 provider。
-
-处理：
-- main.py: LLMAction 新增 _prepare_llm_image_inputs。
-- main.py: generate_comment 调用 provider 前，先下载最多 4 张图片到 cfg.cache_dir，成功后把本地文件路径传给 provider.text_chat(image_urls=...)。
-- main.py: 下载图片时带 User-Agent 和 Referer，减少 QQ 图片防盗链影响。
-- main.py: 下载失败或图片过小时，回退使用原 URL，并记录 warning。
-- main.py: 日志“评论识图输入”现在会显示传给 provider 的实际输入，通常应是本地 cache 路径。
-
-预期：
-- 如果 provider 支持本地路径识图，Gemini 应能真正看到图片。
-- 如果仍然说“请上传图片”，问题就更可能在 AstrBot provider 当前模型/平台没有处理 image_urls，而不是 Qzone 图片解析。
-
-Round 23 - 2026-05-24
+1. 保守修改，尽量不动已有功能，优先新增模块。
+2. 每个 .py 文件保持 500-1000 行以内，职责单一。
+3. import 保持一致：所有同级模块用 `from xxx import yyy`（无点前缀）。
+4. 维护历史写本文件，不塞进 main.py。
+
+Round 24 - 2026-06-03
 ---------------------
 目标：
-收尾瘦身，物理删除已经砍掉的死代码，降低后续 LLM 接手和人工排查成本。
+- 将单 main.py 拆分为多模块，每个文件不超过 1000 行
+- 新增投稿审核功能：LLM 审 + 关键词粗筛 + 黑名单机制
+- 审核通过的内容自动加 "【来自 xxx 的投稿】" 标注
 
-删除/清理：
-- main.py: 删除 UserMemory 用户画像/好感度类。
-- main.py: 删除 CampusWall 投稿墙/审核类。
-- main.py: 删除 AutoPublish 自动发说说类。
-- main.py: 删除 LLMAction.generate_post / generate_reply。
-- main.py: 删除 PostService.view_visitor / reply_comment / delete_post。
-- main.py: 删除 QzonePlugin 中已停用的查看访客、点赞、写稿、删说说、回评、投稿/撤稿/看稿/过稿/拒稿、查看画像等函数。
-- main.py: 删除 QzonePlugin 中 user_memory / campus_wall / auto_publish 初始化和卸载逻辑。
-- _conf_schema.json: 删除 llm.post_provider_id / post_prompt / reply_provider_id / reply_prompt。
-- _conf_schema.json: 删除 trigger.publish_cron。
-- _conf_schema.json: 删除 show_name。
+模块拆分（14个文件，总计3790行）：
+- main.py (747行): 插件入口 & AstrBot 路由
+- config.py (235行): 配置系统
+- model.py (321行): 数据模型
+- db.py (347行): 数据库层
+- parser.py (404行): QQ空间响应解析
+- qzone_session.py (122行): 登录会话
+- qzone_client.py (101行): HTTP客户端
+- qzone_api.py (318行): QQ空间API封装
+- utils.py (170行): 通用工具函数
+- llm_action.py (304行): LLM动作
+- service.py (146行): 业务服务层
+- sender.py (147行): 消息发送与渲染
+- scheduler.py (156行): 定时任务
+- publish_review.py (272行): 投稿审核 ⭐ 新增
 
-保留：
-- /qq空间_看说说、/qq空间_评说说、/qq空间_发说说、/qq空间_测试触发、/qq空间_自检。
-- LLM 工具：llm_publish_feed、llm_visit_friend_qzone。
-- AutoComment 定时扫好友空间。
-- interaction_log 防重复/限流。
-- D 档高危内容温柔评论和群展示文案。
+新增功能：投稿审核（publish_review.py）
+----------------------------------------
+工作原理：
+1. 普通用户发说说 → 走 LLM 审核
+2. 关键词粗筛 → LLM 细审 → 审核通过才发布
+3. 审核通过的内容自动加 "【来自 xxx 的投稿】" 标注
+4. 管理员发说说 → 跳过审核，直接发布
+5. 黑名单机制：
+   - 违规一次记一次 strike
+   - 累计超过 3 次（BAN_THRESHOLD）→ 永久拉黑
+   - 拉黑用户无法再投稿
+   - 黑名单存储在 publish_bans.db（独立的 SQLite 文件）
+   - 黑名单不写在明文规则里（用户无感知）
 
-检查：
-- python3 -m py_compile main.py 通过。
-- python3 -m json.tool _conf_schema.json 通过。
-- main.py 从约 4375 行降到约 3707 行。
+新增管理员命令：
+- /qq空间_封投稿 @用户 — 手动封禁用户投稿权限
+- /qq空间_解封投稿 @用户 — 解封用户投稿权限
+- /qq空间_审核状态 @用户 — 查看用户投稿违规次数
+
+审核流程：
+用户投稿 → 黑名单检查 → 关键词粗筛 → LLM 细审 → 通过/拒绝
+  - 通过：自动加 "【来自 xxx 的投稿】" 标注后发布
+  - 拒绝：记一次违规，累计 3 次后永久拉黑
