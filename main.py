@@ -18,7 +18,21 @@ astrbot_plugin_qqkongjian - QQ空间插件（多文件模块化版）
 └── publish_review.py    ← 投稿审核 (LLM审 + 黑名单)
 """
 
+# 修复 AstrBot 加载时找不到同级模块的问题
+import sys
+from pathlib import Path
+_plugin_dir = Path(__file__).resolve().parent
+if str(_plugin_dir) not in sys.path:
+    sys.path.insert(0, str(_plugin_dir))
+
 from __future__ import annotations
+
+# 修复 AstrBot 加载时找不到同级模块的问题
+import sys
+from pathlib import Path
+_plugin_dir = Path(__file__).resolve().parent
+if str(_plugin_dir) not in sys.path:
+    sys.path.insert(0, str(_plugin_dir))
 
 import asyncio
 import random
