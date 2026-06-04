@@ -498,7 +498,8 @@ class QzonePlugin(Star):
             return
 
         text = event.message_str.partition(" ")[2].strip()
-        images = await get_image_urls(event)
+        allow_images = bool(self.cfg.trigger.publish_with_image if self.cfg.trigger.publish_with_image is not None else True)
+        images = await get_image_urls(event) if allow_images else []
         sender_name = event.get_sender_name() or sender_id
 
         # ---- 投稿审核流程（LLM审 + 黑名单） ----
@@ -716,7 +717,8 @@ class QzonePlugin(Star):
         if daily_limit >= 0 and today_count >= daily_limit and not is_admin:
             return f"你今天已经让 bot 发过 {today_count} 条说说啦，明天再来。"
 
-        images = await get_image_urls(event) if get_image else []
+        allow_images = bool(self.cfg.trigger.publish_with_image if self.cfg.trigger.publish_with_image is not None else True)
+        images = await get_image_urls(event) if (get_image and allow_images) else []
         publish_text = (text or "").strip()
         sender_name = event.get_sender_name() or sender_id
 

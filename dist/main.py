@@ -2353,7 +2353,7 @@ class LLMAction:
 
         llm_image_inputs = await self._prepare_llm_image_inputs(post.images, max_images=4) if has_images else []
         image_rule = (
-            "\n图片审核要求：只要图片中存在真人/写实人物/自拍/清晰人脸/未成年人/泳装内衣/暴露身体/性感姿势/肢体特写/擦边暗示/色情低俗/血腥暴力/二维码或广告引流，就必须不通过。"
+            "\n图片审核要求：只要图片中存在真人/写实人物/自拍/清晰人脸/未成年人/泳装内衣/暴露身体/性感姿势/肢体特写/擦边暗示/色情低俗/血腥暴力/政治敏感画面/二维码或广告引流，就必须不通过。"
             "二次元、游戏截图、风景、宠物、美食等非擦边内容可以通过；但如果二次元/游戏图有明显擦边、暴露、性暗示，也必须不通过。看不清或不确定时按不通过。"
             if has_images else ""
         )
@@ -3039,7 +3039,9 @@ class PublishReview:
     DEFAULT_REVIEW_PROMPT = (
         "你是一个QQ空间说说内容审核员。请判断以下投稿内容是否存在封号或违规风险。\n"
         "重点拦截：违法暴力、色情低俗、赌博毒品、诈骗钓鱼、恶意攻击、人肉网暴、广告引流、政治敏感等内容。\n"
+        "投稿来源显示名也属于将被发布的内容；如果显示名含政治敏感、违法、色情、广告引流等风险，也必须不通过。\n"
         "普通日常、吐槽、游戏、学习、生活分享应通过；不要因为个别普通词过度拦截。\n\n"
+        "投稿来源显示名：@{attribution_name}（原始昵称：{nickname}，用户ID：{user_id}）\n"
         "待审核内容：\n{content}\n\n"
         "请只回答以下两种格式之一：\n"
         "通过\n"
@@ -3180,11 +3182,15 @@ class PublishReview:
         if image_count:
             text_for_check += f"\n[图片说说，共{image_count}张图片]"
 
+        attribution_name = self._safe_attribution_name(user_id, nickname)
         llm_result = await self._llm_review(
             content=text_for_check,
             text=text or "",
             image_count=image_count,
             images=images or [],
+            user_id=user_id,
+            nickname=nickname,
+            attribution_name=attribution_name,
         )
         if not llm_result["approved"]:
             await self.add_strike(user_id, reason=f"LLM审核不通过: {llm_result.get('reason', '')}")
@@ -3205,7 +3211,9 @@ class PublishReview:
             publish_text=attribution_text,
         )
 
-    def _render_review_prompt(self, *, content: str, text: str, image_count: int) -> str:
+    def _render_review_prompt(self, *, content: str, text: str, image_count: int,
+                              user_id: str = "", nickname: str = "",
+                              attribution_name: str = "") -> str:
         template = (
             getattr(self.cfg.llm, "publish_review_prompt", "")
             or self.DEFAULT_REVIEW_PROMPT
@@ -3215,14 +3223,21 @@ class PublishReview:
             "content": content,
             "text": text,
             "image_count": str(image_count),
+            "user_id": str(user_id or ""),
+            "nickname": str(nickname or ""),
+            "attribution_name": str(attribution_name or ""),
         }
         for key, value in variables.items():
             template = template.replace("{" + key + "}", value)
         if "{content}" not in original_template and content not in template:
             template += f"\n\n待审核内容：\n{content}"
+        if "{attribution_name}" not in original_template and attribution_name:
+            template += f"\n\n投稿来源显示名：@{attribution_name}（原始昵称：{nickname}，用户ID：{user_id}）"
         return template
 
-    async def _llm_review(self, *, content: str, text: str = "", image_count: int = 0, images: list[str] | None = None) -> dict[str, Any]:
+    async def _llm_review(self, *, content: str, text: str = "", image_count: int = 0,
+                          images: list[str] | None = None, user_id: str = "",
+                          nickname: str = "", attribution_name: str = "") -> dict[str, Any]:
         provider = (
             self.cfg.context.get_provider_by_id(self.cfg.llm.comment_provider_id)
             or self.cfg.context.get_using_provider()
@@ -3231,11 +3246,14 @@ class PublishReview:
             logger.warning("[PublishReview] LLM 提供商不可用，审核不放行")
             return {"approved": False, "reason": "LLM不可用，无法完成审核"}
 
-        prompt = self._render_review_prompt(content=content, text=text, image_count=image_count)
+        prompt = self._render_review_prompt(
+            content=content, text=text, image_count=image_count,
+            user_id=user_id, nickname=nickname, attribution_name=attribution_name,
+        )
         image_inputs: list[str] = []
         if images:
             prompt += (
-                "\n\n图片审核补充规则：只要图片中存在真人/写实人物/自拍/清晰人脸/疑似未成年人/泳装内衣/暴露身体/性感姿势/肢体特写/擦边暗示/色情低俗/血腥暴力/二维码或广告引流，就必须不通过。"
+                "\n\n图片审核补充规则：只要图片中存在真人/写实人物/自拍/清晰人脸/疑似未成年人/泳装内衣/暴露身体/性感姿势/肢体特写/擦边暗示/色情低俗/血腥暴力/政治敏感画面/二维码或广告引流，就必须不通过。"
                 "二次元、游戏截图、风景、宠物、美食等非擦边内容可以通过；但看不清或不确定时按不通过。"
             )
             image_inputs = await self.llm._prepare_llm_image_inputs(images, max_images=4)
@@ -3764,7 +3782,8 @@ class QzonePlugin(Star):
             return
 
         text = event.message_str.partition(" ")[2].strip()
-        images = await get_image_urls(event)
+        allow_images = bool(self.cfg.trigger.publish_with_image if self.cfg.trigger.publish_with_image is not None else True)
+        images = await get_image_urls(event) if allow_images else []
         sender_name = event.get_sender_name() or sender_id
 
         # ---- 投稿审核流程（LLM审 + 黑名单） ----
@@ -3982,7 +4001,8 @@ class QzonePlugin(Star):
         if daily_limit >= 0 and today_count >= daily_limit and not is_admin:
             return f"你今天已经让 bot 发过 {today_count} 条说说啦，明天再来。"
 
-        images = await get_image_urls(event) if get_image else []
+        allow_images = bool(self.cfg.trigger.publish_with_image if self.cfg.trigger.publish_with_image is not None else True)
+        images = await get_image_urls(event) if (get_image and allow_images) else []
         publish_text = (text or "").strip()
         sender_name = event.get_sender_name() or sender_id
 
