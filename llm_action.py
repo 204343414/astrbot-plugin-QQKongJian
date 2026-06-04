@@ -261,6 +261,74 @@ class LLMAction:
         except Exception as e:
             raise ValueError(f"LLM 调用失败：{e}")
 
+
+    async def review_post_for_forward(self, post: Post) -> tuple[bool, str]:
+        """
+        审核一条外部 QQ 空间说说是否适合被 bot 搬运/展示/自动互动。
+        对含图说说保守处理：真人/写实人物/自拍/擦边/暴露/疑似未成年等一律不搬。
+        """
+        content = "\n".join(x for x in [post.text, post.rt_con] if x).strip()
+        if self.is_critical_risk_content(content):
+            return False, "命中自伤/高危情绪内容"
+
+        provider = (
+            self.context.get_provider_by_id(self.cfg.llm.comment_provider_id)
+            or self.context.get_using_provider()
+        )
+        has_images = bool(post.images)
+        if not isinstance(provider, Provider):
+            if has_images:
+                return False, "LLM不可用，含图说说默认不搬"
+            return True, "无图文本，LLM不可用时放行"
+
+        # 无图普通文本不额外消耗审核；只拦明显风险词。
+        compact = re.sub(r"[\s ]+", "", content).lower()
+        text_risk_words = [
+            "裸照", "色情", "约炮", "外围", "博彩", "赌博", "加微信", "加vx",
+            "刷单", "兼职赚钱", "转账", "人肉", "开盒", "网暴",
+        ]
+        if not has_images and not any(w in compact for w in text_risk_words):
+            return True, "无图普通文本"
+
+        llm_image_inputs = await self._prepare_llm_image_inputs(post.images, max_images=4) if has_images else []
+        image_rule = (
+            "\n图片审核要求：只要图片中存在真人/写实人物/自拍/清晰人脸/未成年人/泳装内衣/暴露身体/性感姿势/肢体特写/擦边暗示/色情低俗/血腥暴力/二维码或广告引流，就必须不通过。"
+            "二次元、游戏截图、风景、宠物、美食等非擦边内容可以通过；但如果二次元/游戏图有明显擦边、暴露、性暗示，也必须不通过。看不清或不确定时按不通过。"
+            if has_images else ""
+        )
+        prompt = (
+            "你是 QQ 群聊内容安全审核员。判断下面这条 QQ 空间说说是否适合被 bot 搬运展示到群聊、自动评论或点赞。\n"
+            "审核要保守，任何可能导致 bot 风控/封号/群聊不适的内容都不通过。\n"
+            "文本风险包括：违法暴力、色情低俗、擦边引流、广告营销、诈骗、赌博、毒品、人肉网暴、政治敏感、自伤高危等。"
+            f"{image_rule}\n\n"
+            f"说说作者：{post.name}({post.uin})\n"
+            f"说说文字：{content or '（无文字）'}\n"
+            f"图片数量：{len(post.images)}\n\n"
+            "请只回答：\n通过\n或\n不通过|简短原因"
+        )
+        try:
+            resp = await provider.text_chat(
+                system_prompt="你是严格的群聊内容安全审核员。只输出审核结论，不要解释多余内容。",
+                prompt=prompt,
+                image_urls=llm_image_inputs,
+            )
+            result = self.strip_thinking(resp.completion_text).strip()
+            compact_result = re.sub(r"[\s ]+", "", result)
+            if compact_result.startswith("通过") and not compact_result.startswith("不通过"):
+                return True, "LLM审核通过"
+            if compact_result.startswith("不通过"):
+                parts = result.split("|", 1)
+                return False, parts[1].strip() if len(parts) > 1 else "LLM审核不通过"
+            if "不通过" in compact_result or "拒绝" in compact_result or "违规" in compact_result:
+                return False, "LLM审核不通过"
+            logger.warning(f"搬运安全审核返回不可解析：{result!r}，按不通过处理")
+            return False, "审核结果不可解析"
+        except Exception as e:
+            logger.error(f"搬运安全审核异常：{e}")
+            if has_images:
+                return False, f"审核异常，含图说说默认不搬: {e}"
+            return True, f"审核异常，无图文本放行: {e}"
+
     async def should_like(self, post: Post) -> bool:
         """让LLM判断是否应该给这条说说点赞"""
         content = post.text or ""

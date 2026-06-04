@@ -272,6 +272,13 @@ class QzonePlugin(Star):
             return False
 
         try:
+            safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+            if not safe_to_forward:
+                logger.warning(f"群展示跳过：tid={post.tid}, uin={post.uin}, reason={unsafe_reason}")
+                if force:
+                    await event.send(event.plain_result(f"测试触发展示已跳过：该说说不适合搬运。原因：{unsafe_reason}"))
+                return False
+
             content_for_risk = "\n".join(x for x in [post.text, post.rt_con] if x)
             is_critical = LLMAction.is_critical_risk_content(content_for_risk)
             was_commented = await self.db.has_interaction(action="space_comment", tid=post.tid)
@@ -375,6 +382,10 @@ class QzonePlugin(Star):
     async def view_feed(self, event: AiocqhttpMessageEvent, arg: str | None = None):
         posts = await self._get_posts(event, with_detail=True)
         for post in posts:
+            safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+            if not safe_to_forward:
+                await event.send(event.plain_result(f"这条说说不适合搬运展示，已跳过。原因：{unsafe_reason}"))
+                continue
             await self.sender.send_post(event, post)
 
     @filter.command("qq空间_评说说", alias={"qq空间_评论说说", "qq空间_读说说"})
@@ -386,6 +397,11 @@ class QzonePlugin(Star):
             posts = await self._get_posts(event, no_commented=True, no_self=True)
             for post in posts:
                 try:
+                    safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+                    if not safe_to_forward:
+                        await event.send(event.plain_result(f"这条说说不适合评论或搬运展示，已跳过。原因：{unsafe_reason}"))
+                        continue
+
                     await self.service.comment_posts(post)
                     msg = "已评论"
                     if self.cfg.trigger.like_when_comment:
@@ -440,6 +456,12 @@ class QzonePlugin(Star):
                 await asyncio.sleep(1)
                 continue
             try:
+                safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+                if not safe_to_forward:
+                    logger.warning(f"随机互动跳过不适合搬运/互动的说说：tid={post.tid}, uin={post.uin}, reason={unsafe_reason}")
+                    await asyncio.sleep(1)
+                    continue
+
                 await self.service.comment_posts(post)
                 msg = "已评论"
                 if self.cfg.trigger.like_when_comment:
@@ -524,7 +546,7 @@ class QzonePlugin(Star):
 
         # 管理员直接发布
         if bool(self.cfg.trigger.publish_with_attribution if self.cfg.trigger.publish_with_attribution is not None else True):
-            text = f"【来自 {sender_name} 的投稿】\n\n{text}" if text else f"【来自 {sender_name} 的投稿】"
+            text = PublishReview.build_attribution_text(str(sender_id), sender_name, text)
         try:
             post = await self.service.publish_post(text=text, images=images)
             await self.db.log_interaction(
@@ -739,7 +761,7 @@ class QzonePlugin(Star):
                 return f"发布失败：{e}"
 
         if bool(self.cfg.trigger.publish_with_attribution if self.cfg.trigger.publish_with_attribution is not None else True):
-            publish_text = f"【来自 {sender_name} 的投稿】\n\n{publish_text}" if publish_text else f"【来自 {sender_name} 的投稿】"
+            publish_text = PublishReview.build_attribution_text(str(sender_id), sender_name, publish_text)
         try:
             post = await self.service.publish_post(text=publish_text, images=images)
             await self.db.log_interaction(
@@ -775,6 +797,9 @@ class QzonePlugin(Star):
         if not posts:
             return "访问成功，但是空间是空的，最近没有发说说。"
         post = posts[0]
+        safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+        if not safe_to_forward:
+            return f"访问成功，但这条说说不适合搬运展示，已跳过发送卡片。原因：{unsafe_reason}"
         await self.sender.send_post(event, post, message="只读查看空间：未评论，未点赞")
         text_preview = (post.text or post.rt_con or "（无文字内容）").replace("\n", " ")
         if len(text_preview) > 120:

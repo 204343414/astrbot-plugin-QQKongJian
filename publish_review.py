@@ -11,6 +11,7 @@
 """
 
 import json
+import re
 import time
 import asyncio
 from pathlib import Path
@@ -56,6 +57,49 @@ class PublishReview:
         "或\n"
         "不通过|具体原因（简短一句话）"
     )
+
+    _UNSAFE_ATTRIBUTION_PATTERNS = [
+        "加微信", "加vx", "加v", "微信", "vx", "v信", "加qq", "加群",
+        "转账", "收款", "付款", "付费", "刷单", "兼职", "赚钱", "约炮",
+        "裸", "黄", "色情", "福利", "外围", "博彩", "赌博", "代充", "广告",
+        "http://", "https://", "www.", ".com", ".cn", "t.me",
+    ]
+
+    @staticmethod
+    def _safe_attribution_name(user_id: str, nickname: str) -> str:
+        """
+        投稿来源会被发到 QQ 空间正文里，不能直接信任群昵称。
+        昵称如果含广告/引流/擦边/链接等风险词，就退回不可引流的短标识。
+        """
+        raw = str(nickname or "").strip()
+        raw = re.sub(r"\[CQ:[^\]]+\]", "", raw)
+        raw = re.sub(r"[\r\n\t]+", " ", raw)
+        raw = re.sub(r"\s+", " ", raw).strip()
+        raw = raw.strip("@｜|:：,，;；[]【】()（）<>《》")
+        compact = re.sub(r"\s+", "", raw).lower()
+
+        uid = re.sub(r"\D", "", str(user_id or ""))
+        fallback = f"用户{uid[-4:]}" if len(uid) >= 4 else "投稿人"
+
+        if not raw or len(raw) > 24:
+            return fallback
+        if any(p in compact for p in PublishReview._UNSAFE_ATTRIBUTION_PATTERNS):
+            return fallback
+        if re.search(r"(?:\d[ -]?){5,}", raw):
+            return fallback
+        if re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", raw):
+            return fallback
+
+        # 保留常见昵称字符，去掉容易构造链接/命令的符号。
+        safe = re.sub(r"[^0-9A-Za-z_\- \u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af·・]", "", raw)
+        safe = re.sub(r"\s+", " ", safe).strip()[:16]
+        return safe or fallback
+
+    @staticmethod
+    def build_attribution_text(user_id: str, nickname: str, text: str) -> str:
+        safe_name = PublishReview._safe_attribution_name(user_id, nickname)
+        prefix = f"【来自 @{safe_name} 的投稿】"
+        return f"{prefix}\n\n{text}" if text else prefix
 
     def __init__(self, config: PluginConfig, db: PostDB, llm: LLMAction):
         self.cfg = config
@@ -151,6 +195,7 @@ class PublishReview:
             content=text_for_check,
             text=text or "",
             image_count=image_count,
+            images=images or [],
         )
         if not llm_result["approved"]:
             await self.add_strike(user_id, reason=f"LLM审核不通过: {llm_result.get('reason', '')}")
@@ -164,7 +209,7 @@ class PublishReview:
 
         # Step 4: 审核通过，加标注
         self._last_submit_ts[user_id] = now
-        attribution_text = f"【来自 {nickname} 的投稿】\n\n{text}" if text else f"【来自 {nickname} 的投稿】"
+        attribution_text = self.build_attribution_text(user_id, nickname, text)
         logger.info(f"[PublishReview] 用户 {user_id} 投稿审核通过")
         return ReviewResult(
             status=ReviewResult.APPROVED,
@@ -188,7 +233,7 @@ class PublishReview:
             template += f"\n\n待审核内容：\n{content}"
         return template
 
-    async def _llm_review(self, *, content: str, text: str = "", image_count: int = 0) -> dict[str, Any]:
+    async def _llm_review(self, *, content: str, text: str = "", image_count: int = 0, images: list[str] | None = None) -> dict[str, Any]:
         provider = (
             self.cfg.context.get_provider_by_id(self.cfg.llm.comment_provider_id)
             or self.cfg.context.get_using_provider()
@@ -198,11 +243,19 @@ class PublishReview:
             return {"approved": False, "reason": "LLM不可用，无法完成审核"}
 
         prompt = self._render_review_prompt(content=content, text=text, image_count=image_count)
+        image_inputs: list[str] = []
+        if images:
+            prompt += (
+                "\n\n图片审核补充规则：只要图片中存在真人/写实人物/自拍/清晰人脸/疑似未成年人/泳装内衣/暴露身体/性感姿势/肢体特写/擦边暗示/色情低俗/血腥暴力/二维码或广告引流，就必须不通过。"
+                "二次元、游戏截图、风景、宠物、美食等非擦边内容可以通过；但看不清或不确定时按不通过。"
+            )
+            image_inputs = await self.llm._prepare_llm_image_inputs(images, max_images=4)
 
         try:
             response = await provider.text_chat(
                 system_prompt="你是QQ空间内容审核员，严格审核用户投稿内容，存在封号风险的内容一律不通过。不要解释，不要多余的话。",
                 prompt=prompt,
+                image_urls=image_inputs,
             )
             result_text = response.completion_text.strip()
             return self._parse_llm_result(result_text)

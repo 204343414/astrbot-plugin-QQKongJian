@@ -142,6 +142,11 @@ class AutoComment(AutoRandomCronTask):
                 if last_ts and time.time() - last_ts < cooldown_minutes * 60:
                     continue
 
+                safe_to_forward, unsafe_reason = await self.service.llm.review_post_for_forward(post)
+                if not safe_to_forward:
+                    logger.warning(f"[AutoComment] 跳过不适合搬运/互动的说说：tid={post.tid}, uin={post.uin}, reason={unsafe_reason}")
+                    continue
+
                 await self.service.comment_posts(post)
                 await self.service.db.log_interaction(
                     action="space_comment",

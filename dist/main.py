@@ -2322,6 +2322,74 @@ class LLMAction:
         except Exception as e:
             raise ValueError(f"LLM 调用失败：{e}")
 
+
+    async def review_post_for_forward(self, post: Post) -> tuple[bool, str]:
+        """
+        审核一条外部 QQ 空间说说是否适合被 bot 搬运/展示/自动互动。
+        对含图说说保守处理：真人/写实人物/自拍/擦边/暴露/疑似未成年等一律不搬。
+        """
+        content = "\n".join(x for x in [post.text, post.rt_con] if x).strip()
+        if self.is_critical_risk_content(content):
+            return False, "命中自伤/高危情绪内容"
+
+        provider = (
+            self.context.get_provider_by_id(self.cfg.llm.comment_provider_id)
+            or self.context.get_using_provider()
+        )
+        has_images = bool(post.images)
+        if not isinstance(provider, Provider):
+            if has_images:
+                return False, "LLM不可用，含图说说默认不搬"
+            return True, "无图文本，LLM不可用时放行"
+
+        # 无图普通文本不额外消耗审核；只拦明显风险词。
+        compact = re.sub(r"[\s ]+", "", content).lower()
+        text_risk_words = [
+            "裸照", "色情", "约炮", "外围", "博彩", "赌博", "加微信", "加vx",
+            "刷单", "兼职赚钱", "转账", "人肉", "开盒", "网暴",
+        ]
+        if not has_images and not any(w in compact for w in text_risk_words):
+            return True, "无图普通文本"
+
+        llm_image_inputs = await self._prepare_llm_image_inputs(post.images, max_images=4) if has_images else []
+        image_rule = (
+            "\n图片审核要求：只要图片中存在真人/写实人物/自拍/清晰人脸/未成年人/泳装内衣/暴露身体/性感姿势/肢体特写/擦边暗示/色情低俗/血腥暴力/二维码或广告引流，就必须不通过。"
+            "二次元、游戏截图、风景、宠物、美食等非擦边内容可以通过；但如果二次元/游戏图有明显擦边、暴露、性暗示，也必须不通过。看不清或不确定时按不通过。"
+            if has_images else ""
+        )
+        prompt = (
+            "你是 QQ 群聊内容安全审核员。判断下面这条 QQ 空间说说是否适合被 bot 搬运展示到群聊、自动评论或点赞。\n"
+            "审核要保守，任何可能导致 bot 风控/封号/群聊不适的内容都不通过。\n"
+            "文本风险包括：违法暴力、色情低俗、擦边引流、广告营销、诈骗、赌博、毒品、人肉网暴、政治敏感、自伤高危等。"
+            f"{image_rule}\n\n"
+            f"说说作者：{post.name}({post.uin})\n"
+            f"说说文字：{content or '（无文字）'}\n"
+            f"图片数量：{len(post.images)}\n\n"
+            "请只回答：\n通过\n或\n不通过|简短原因"
+        )
+        try:
+            resp = await provider.text_chat(
+                system_prompt="你是严格的群聊内容安全审核员。只输出审核结论，不要解释多余内容。",
+                prompt=prompt,
+                image_urls=llm_image_inputs,
+            )
+            result = self.strip_thinking(resp.completion_text).strip()
+            compact_result = re.sub(r"[\s ]+", "", result)
+            if compact_result.startswith("通过") and not compact_result.startswith("不通过"):
+                return True, "LLM审核通过"
+            if compact_result.startswith("不通过"):
+                parts = result.split("|", 1)
+                return False, parts[1].strip() if len(parts) > 1 else "LLM审核不通过"
+            if "不通过" in compact_result or "拒绝" in compact_result or "违规" in compact_result:
+                return False, "LLM审核不通过"
+            logger.warning(f"搬运安全审核返回不可解析：{result!r}，按不通过处理")
+            return False, "审核结果不可解析"
+        except Exception as e:
+            logger.error(f"搬运安全审核异常：{e}")
+            if has_images:
+                return False, f"审核异常，含图说说默认不搬: {e}"
+            return True, f"审核异常，无图文本放行: {e}"
+
     async def should_like(self, post: Post) -> bool:
         """让LLM判断是否应该给这条说说点赞"""
         content = post.text or ""
@@ -2886,6 +2954,11 @@ class AutoComment(AutoRandomCronTask):
                 if last_ts and time.time() - last_ts < cooldown_minutes * 60:
                     continue
 
+                safe_to_forward, unsafe_reason = await self.service.llm.review_post_for_forward(post)
+                if not safe_to_forward:
+                    logger.warning(f"[AutoComment] 跳过不适合搬运/互动的说说：tid={post.tid}, uin={post.uin}, reason={unsafe_reason}")
+                    continue
+
                 await self.service.comment_posts(post)
                 await self.service.db.log_interaction(
                     action="space_comment",
@@ -2931,6 +3004,7 @@ class AutoComment(AutoRandomCronTask):
 """
 
 import json
+import re
 import time
 import asyncio
 from pathlib import Path
@@ -2972,6 +3046,49 @@ class PublishReview:
         "或\n"
         "不通过|具体原因（简短一句话）"
     )
+
+    _UNSAFE_ATTRIBUTION_PATTERNS = [
+        "加微信", "加vx", "加v", "微信", "vx", "v信", "加qq", "加群",
+        "转账", "收款", "付款", "付费", "刷单", "兼职", "赚钱", "约炮",
+        "裸", "黄", "色情", "福利", "外围", "博彩", "赌博", "代充", "广告",
+        "http://", "https://", "www.", ".com", ".cn", "t.me",
+    ]
+
+    @staticmethod
+    def _safe_attribution_name(user_id: str, nickname: str) -> str:
+        """
+        投稿来源会被发到 QQ 空间正文里，不能直接信任群昵称。
+        昵称如果含广告/引流/擦边/链接等风险词，就退回不可引流的短标识。
+        """
+        raw = str(nickname or "").strip()
+        raw = re.sub(r"\[CQ:[^\]]+\]", "", raw)
+        raw = re.sub(r"[\r\n\t]+", " ", raw)
+        raw = re.sub(r"\s+", " ", raw).strip()
+        raw = raw.strip("@｜|:：,，;；[]【】()（）<>《》")
+        compact = re.sub(r"\s+", "", raw).lower()
+
+        uid = re.sub(r"\D", "", str(user_id or ""))
+        fallback = f"用户{uid[-4:]}" if len(uid) >= 4 else "投稿人"
+
+        if not raw or len(raw) > 24:
+            return fallback
+        if any(p in compact for p in PublishReview._UNSAFE_ATTRIBUTION_PATTERNS):
+            return fallback
+        if re.search(r"(?:\d[ -]?){5,}", raw):
+            return fallback
+        if re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", raw):
+            return fallback
+
+        # 保留常见昵称字符，去掉容易构造链接/命令的符号。
+        safe = re.sub(r"[^0-9A-Za-z_\- \u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af·・]", "", raw)
+        safe = re.sub(r"\s+", " ", safe).strip()[:16]
+        return safe or fallback
+
+    @staticmethod
+    def build_attribution_text(user_id: str, nickname: str, text: str) -> str:
+        safe_name = PublishReview._safe_attribution_name(user_id, nickname)
+        prefix = f"【来自 @{safe_name} 的投稿】"
+        return f"{prefix}\n\n{text}" if text else prefix
 
     def __init__(self, config: PluginConfig, db: PostDB, llm: LLMAction):
         self.cfg = config
@@ -3067,6 +3184,7 @@ class PublishReview:
             content=text_for_check,
             text=text or "",
             image_count=image_count,
+            images=images or [],
         )
         if not llm_result["approved"]:
             await self.add_strike(user_id, reason=f"LLM审核不通过: {llm_result.get('reason', '')}")
@@ -3080,7 +3198,7 @@ class PublishReview:
 
         # Step 4: 审核通过，加标注
         self._last_submit_ts[user_id] = now
-        attribution_text = f"【来自 {nickname} 的投稿】\n\n{text}" if text else f"【来自 {nickname} 的投稿】"
+        attribution_text = self.build_attribution_text(user_id, nickname, text)
         logger.info(f"[PublishReview] 用户 {user_id} 投稿审核通过")
         return ReviewResult(
             status=ReviewResult.APPROVED,
@@ -3104,7 +3222,7 @@ class PublishReview:
             template += f"\n\n待审核内容：\n{content}"
         return template
 
-    async def _llm_review(self, *, content: str, text: str = "", image_count: int = 0) -> dict[str, Any]:
+    async def _llm_review(self, *, content: str, text: str = "", image_count: int = 0, images: list[str] | None = None) -> dict[str, Any]:
         provider = (
             self.cfg.context.get_provider_by_id(self.cfg.llm.comment_provider_id)
             or self.cfg.context.get_using_provider()
@@ -3114,11 +3232,19 @@ class PublishReview:
             return {"approved": False, "reason": "LLM不可用，无法完成审核"}
 
         prompt = self._render_review_prompt(content=content, text=text, image_count=image_count)
+        image_inputs: list[str] = []
+        if images:
+            prompt += (
+                "\n\n图片审核补充规则：只要图片中存在真人/写实人物/自拍/清晰人脸/疑似未成年人/泳装内衣/暴露身体/性感姿势/肢体特写/擦边暗示/色情低俗/血腥暴力/二维码或广告引流，就必须不通过。"
+                "二次元、游戏截图、风景、宠物、美食等非擦边内容可以通过；但看不清或不确定时按不通过。"
+            )
+            image_inputs = await self.llm._prepare_llm_image_inputs(images, max_images=4)
 
         try:
             response = await provider.text_chat(
                 system_prompt="你是QQ空间内容审核员，严格审核用户投稿内容，存在封号风险的内容一律不通过。不要解释，不要多余的话。",
                 prompt=prompt,
+                image_urls=image_inputs,
             )
             result_text = response.completion_text.strip()
             return self._parse_llm_result(result_text)
@@ -3412,6 +3538,13 @@ class QzonePlugin(Star):
             return False
 
         try:
+            safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+            if not safe_to_forward:
+                logger.warning(f"群展示跳过：tid={post.tid}, uin={post.uin}, reason={unsafe_reason}")
+                if force:
+                    await event.send(event.plain_result(f"测试触发展示已跳过：该说说不适合搬运。原因：{unsafe_reason}"))
+                return False
+
             content_for_risk = "\n".join(x for x in [post.text, post.rt_con] if x)
             is_critical = LLMAction.is_critical_risk_content(content_for_risk)
             was_commented = await self.db.has_interaction(action="space_comment", tid=post.tid)
@@ -3515,6 +3648,10 @@ class QzonePlugin(Star):
     async def view_feed(self, event: AiocqhttpMessageEvent, arg: str | None = None):
         posts = await self._get_posts(event, with_detail=True)
         for post in posts:
+            safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+            if not safe_to_forward:
+                await event.send(event.plain_result(f"这条说说不适合搬运展示，已跳过。原因：{unsafe_reason}"))
+                continue
             await self.sender.send_post(event, post)
 
     @filter.command("qq空间_评说说", alias={"qq空间_评论说说", "qq空间_读说说"})
@@ -3526,6 +3663,11 @@ class QzonePlugin(Star):
             posts = await self._get_posts(event, no_commented=True, no_self=True)
             for post in posts:
                 try:
+                    safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+                    if not safe_to_forward:
+                        await event.send(event.plain_result(f"这条说说不适合评论或搬运展示，已跳过。原因：{unsafe_reason}"))
+                        continue
+
                     await self.service.comment_posts(post)
                     msg = "已评论"
                     if self.cfg.trigger.like_when_comment:
@@ -3580,6 +3722,12 @@ class QzonePlugin(Star):
                 await asyncio.sleep(1)
                 continue
             try:
+                safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+                if not safe_to_forward:
+                    logger.warning(f"随机互动跳过不适合搬运/互动的说说：tid={post.tid}, uin={post.uin}, reason={unsafe_reason}")
+                    await asyncio.sleep(1)
+                    continue
+
                 await self.service.comment_posts(post)
                 msg = "已评论"
                 if self.cfg.trigger.like_when_comment:
@@ -3664,7 +3812,7 @@ class QzonePlugin(Star):
 
         # 管理员直接发布
         if bool(self.cfg.trigger.publish_with_attribution if self.cfg.trigger.publish_with_attribution is not None else True):
-            text = f"【来自 {sender_name} 的投稿】\n\n{text}" if text else f"【来自 {sender_name} 的投稿】"
+            text = PublishReview.build_attribution_text(str(sender_id), sender_name, text)
         try:
             post = await self.service.publish_post(text=text, images=images)
             await self.db.log_interaction(
@@ -3879,7 +4027,7 @@ class QzonePlugin(Star):
                 return f"发布失败：{e}"
 
         if bool(self.cfg.trigger.publish_with_attribution if self.cfg.trigger.publish_with_attribution is not None else True):
-            publish_text = f"【来自 {sender_name} 的投稿】\n\n{publish_text}" if publish_text else f"【来自 {sender_name} 的投稿】"
+            publish_text = PublishReview.build_attribution_text(str(sender_id), sender_name, publish_text)
         try:
             post = await self.service.publish_post(text=publish_text, images=images)
             await self.db.log_interaction(
@@ -3915,6 +4063,9 @@ class QzonePlugin(Star):
         if not posts:
             return "访问成功，但是空间是空的，最近没有发说说。"
         post = posts[0]
+        safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
+        if not safe_to_forward:
+            return f"访问成功，但这条说说不适合搬运展示，已跳过发送卡片。原因：{unsafe_reason}"
         await self.sender.send_post(event, post, message="只读查看空间：未评论，未点赞")
         text_preview = (post.text or post.rt_con or "（无文字内容）").replace("\n", " ")
         if len(text_preview) > 120:
