@@ -2618,7 +2618,9 @@ class Sender:
             for name in self._DEFAULT_FONT_FILES:
                 src = self._find_existing_font(name)
                 dst = runtime_fonts_dir / name
-                if src and (not dst.exists() or dst.stat().st_size == 0):
+                if src:
+                    # 每次都覆盖运行时字体，避免旧版本曾把 .ttc 字体集合
+                    # 复制成 .ttf 后留下不可读文件。
                     shutil.copyfile(src, dst)
 
             still_missing = [name for name in self._DEFAULT_FONT_FILES if not (runtime_fonts_dir / name).exists()]
