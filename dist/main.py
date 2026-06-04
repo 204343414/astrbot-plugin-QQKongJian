@@ -2541,17 +2541,13 @@ class Sender:
         self.style = None
         self._load_renderer()
 
-    # setting.json 里显式引用 4 个字体；pillowmd 还会默认加载
-    # secondFonts: yahei.ttf / unifont.ttf，以及内置默认 smSans.ttf。
-    # 有些部署环境的 pillowmd 包没有带 data/fonts，所以这些也要补齐。
+    # default_style/setting.json 显式引用的字体。正常发布包会携带这些字体；
+    # 如果用户手动删除了字体目录，则再退回运行时兜底。
     _DEFAULT_FONT_FILES = (
         "OPPOSans-Regular.ttf",
         "OPPOSans-Medium.ttf",
         "仓耳小丸子.ttf",
         "STIXTwoMath-Regular.ttf",
-        "yahei.ttf",
-        "unifont.ttf",
-        "smSans.ttf",
     )
 
     _SYSTEM_TTF_CANDIDATES = (
@@ -2577,14 +2573,8 @@ class Sender:
         package_font_dir = self._pillowmd_font_dir()
         if package_font_dir and package_font_dir.exists():
             # 先拿 pillowmd 自带字体。它们一定是 pillowmd 自己能读的格式。
-            if target_name == "STIXTwoMath-Regular.ttf":
-                package_names = ["STIXTwoMath-Regular.ttf", "smSans.ttf", "yahei.ttf", "unifont.ttf"]
-            elif target_name in {"yahei.ttf", "unifont.ttf", "smSans.ttf"}:
-                package_names = [target_name, "smSans.ttf", "yahei.ttf", "unifont.ttf"]
-            else:
-                package_names = ["smSans.ttf", "yahei.ttf", "unifont.ttf"]
+            package_names = [target_name, "STIXTwoMath-Regular.ttf", "smSans.ttf", "yahei.ttf", "unifont.ttf"]
             candidates.extend(package_font_dir / name for name in package_names)
-
         candidates.extend(Path(path) for path in self._SYSTEM_TTF_CANDIDATES)
         return candidates
 
@@ -2596,10 +2586,8 @@ class Sender:
 
     def _prepare_runtime_default_style(self, style_dir: Path) -> Path:
         """
-        default_style 仓库里不再携带大字体文件时，pillowmd 在渲染阶段会
-        ImageFont.truetype(...)->cannot open resource。这里不把字体重新塞回仓库，
-        而是在 AstrBot 数据目录生成一个运行时样式副本，并用系统字体补齐
-        setting.json 里引用的 4 个字体文件名。
+        正常情况下 default_style/fonts 会随插件发布。若用户手动删掉字体，
+        则在 AstrBot 数据目录生成运行时样式副本，用 pillowmd/系统字体兜底。
         """
         if style_dir.resolve() != self.cfg.default_style_dir.resolve():
             return style_dir
@@ -2619,8 +2607,6 @@ class Sender:
                 src = self._find_existing_font(name)
                 dst = runtime_fonts_dir / name
                 if src:
-                    # 每次都覆盖运行时字体，避免旧版本曾把 .ttc 字体集合
-                    # 复制成 .ttf 后留下不可读文件。
                     shutil.copyfile(src, dst)
 
             still_missing = [name for name in self._DEFAULT_FONT_FILES if not (runtime_fonts_dir / name).exists()]
@@ -2628,7 +2614,7 @@ class Sender:
                 logger.warning(f"default_style 缺少字体，且未找到可用替代字体 {still_missing}；将尝试原样加载并可能降级纯文本")
                 return style_dir
 
-            logger.info(f"default_style 缺少字体 {missing_fonts}，已用系统字体生成运行时样式：{runtime_style_dir}")
+            logger.info(f"default_style 缺少字体 {missing_fonts}，已用替代字体生成运行时样式：{runtime_style_dir}")
             return runtime_style_dir
         except Exception as e:
             logger.warning(f"生成运行时样式失败，将尝试原样加载并可能降级纯文本：{e}")
