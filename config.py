@@ -99,6 +99,8 @@ class ConfigNode:
 class LLMConfig(ConfigNode):
     comment_provider_id: str
     comment_prompt: str
+    publish_review_prompt: str
+    publish_review_prompt_variables: str
 
 
 class SourceConfig(ConfigNode):

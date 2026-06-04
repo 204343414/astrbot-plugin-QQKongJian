@@ -5,6 +5,8 @@
 用法: python3 build.py
 """
 
+from __future__ import annotations
+
 import os
 import re
 from pathlib import Path
@@ -68,6 +70,8 @@ astrbot_plugin_qqkongjian - QQ空间插件（单文件部署版）
 └── main.py              ← 插件入口 & AstrBot 路由
 """
 
+from __future__ import annotations
+
 '''
 
 def merge_modules():
@@ -90,7 +94,7 @@ def merge_modules():
         filtered_lines = []
         skip_next_empty = False
         for line in lines:
-            should_remove = False
+            should_remove = line.strip() == "from __future__ import annotations"
             for rm_import in REMOVE_IMPORTS:
                 if line.startswith(rm_import) or line.startswith(f"from .{rm_import.split(' ')[1]}"):
                     should_remove = True

@@ -1,4 +1,5 @@
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,78 @@ class Sender:
         self.style = None
         self._load_renderer()
 
+    _DEFAULT_FONT_FILES = (
+        "OPPOSans-Regular.ttf",
+        "OPPOSans-Medium.ttf",
+        "仓耳小丸子.ttf",
+        "STIXTwoMath-Regular.ttf",
+    )
+
+    _CJK_FONT_CANDIDATES = (
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/arphic/uming.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+    )
+
+    _LATIN_FONT_CANDIDATES = (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    )
+
+    def _find_existing_font(self, prefer_cjk: bool = True) -> Path | None:
+        candidates = self._CJK_FONT_CANDIDATES if prefer_cjk else self._LATIN_FONT_CANDIDATES
+        for candidate in candidates + (() if prefer_cjk else self._CJK_FONT_CANDIDATES):
+            path = Path(candidate)
+            if path.exists() and path.is_file():
+                return path
+        return None
+
+    def _prepare_runtime_default_style(self, style_dir: Path) -> Path:
+        """
+        default_style 仓库里不再携带大字体文件时，pillowmd 在渲染阶段会
+        ImageFont.truetype(...)->cannot open resource。这里不把字体重新塞回仓库，
+        而是在 AstrBot 数据目录生成一个运行时样式副本，并用系统字体补齐
+        setting.json 里引用的 4 个字体文件名。
+        """
+        if style_dir.resolve() != self.cfg.default_style_dir.resolve():
+            return style_dir
+
+        fonts_dir = style_dir / "fonts"
+        if all((fonts_dir / name).exists() for name in self._DEFAULT_FONT_FILES):
+            return style_dir
+
+        runtime_style_dir = self.cfg.data_dir / "default_style_runtime"
+        runtime_fonts_dir = runtime_style_dir / "fonts"
+        try:
+            shutil.copytree(style_dir, runtime_style_dir, dirs_exist_ok=True)
+            runtime_fonts_dir.mkdir(parents=True, exist_ok=True)
+
+            cjk_font = self._find_existing_font(prefer_cjk=True)
+            latin_font = self._find_existing_font(prefer_cjk=False) or cjk_font
+            if not cjk_font and not latin_font:
+                logger.warning("default_style 缺少字体，且未找到可用系统字体；将尝试原样加载并可能降级纯文本")
+                return style_dir
+
+            for name in self._DEFAULT_FONT_FILES:
+                src = latin_font if name == "STIXTwoMath-Regular.ttf" and latin_font else cjk_font or latin_font
+                dst = runtime_fonts_dir / name
+                if src and (not dst.exists() or dst.stat().st_size == 0):
+                    shutil.copyfile(src, dst)
+
+            logger.info(f"default_style 缺少随仓库字体，已用系统字体生成运行时样式：{runtime_style_dir}")
+            return runtime_style_dir
+        except Exception as e:
+            logger.warning(f"生成运行时样式失败，将尝试原样加载并可能降级纯文本：{e}")
+            return style_dir
+
     def _load_renderer(self):
         try:
             style_dir = Path(self.cfg.style_dir)
@@ -33,6 +106,7 @@ class Sender:
                 logger.error(f"pillowmd样式目录不存在：{style_dir}，将降级为纯文本")
                 self.style = None
                 return
+            style_dir = self._prepare_runtime_default_style(style_dir)
             self.style = pillowmd.LoadMarkdownStyles(str(style_dir))
             logger.info(f"pillowmd样式加载成功：{style_dir}")
         except Exception as e:
