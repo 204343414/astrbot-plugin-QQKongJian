@@ -168,6 +168,12 @@
                 "hint": "开启后会在正文前加“【来自 昵称 的投稿】”。",
                 "default": true
             },
+            "publish_with_image": {
+                "description": "投稿时是否允许携带图片",
+                "type": "bool",
+                "hint": "开启后 /qq空间_发说说 会尝试读取消息中的图片并随说说一起发布；关闭后只发布文字。",
+                "default": true
+            },
             "auto_probe_cooldown_minutes": {
                 "description": "同一用户自动探测空间的最小间隔（分钟）",
                 "type": "int",

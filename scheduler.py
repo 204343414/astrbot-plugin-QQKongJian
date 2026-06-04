@@ -1,5 +1,6 @@
 import asyncio
 import random
+import re
 import time
 import zoneinfo
 from datetime import datetime, timedelta
@@ -30,10 +31,22 @@ class AutoRandomCronTask:
         self.timezone = timezone
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
         self.scheduler.start()
-        self.cron_expr = cron_expr
+        self.cron_expr = self._normalize_cron_expr(cron_expr)
         self.job_name = job_name
         self.register_task()
         logger.info(f"[{self.job_name}] 已启动，任务周期：{self.cron_expr}")
+
+    @staticmethod
+    def _normalize_cron_expr(cron_expr: str) -> str:
+        """兼容把 */8 误写/误存成 /8 或 * /8 的 cron。"""
+        expr = re.sub(r"\s+", " ", str(cron_expr or "").strip())
+        parts = expr.split(" ")
+        if len(parts) == 5:
+            parts = [("*" + part) if re.fullmatch(r"/\d+", part) else part for part in parts]
+            return " ".join(parts)
+        if len(parts) == 6 and parts[0] == "*" and re.fullmatch(r"/\d+", parts[1]):
+            return "*" + parts[1] + " " + " ".join(parts[2:])
+        return expr
 
     def register_task(self):
         try:

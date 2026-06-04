@@ -2541,37 +2541,56 @@ class Sender:
         self.style = None
         self._load_renderer()
 
+    # setting.json 里显式引用 4 个字体；pillowmd 还会默认加载
+    # secondFonts: yahei.ttf / unifont.ttf，以及内置默认 smSans.ttf。
+    # 有些部署环境的 pillowmd 包没有带 data/fonts，所以这些也要补齐。
     _DEFAULT_FONT_FILES = (
         "OPPOSans-Regular.ttf",
         "OPPOSans-Medium.ttf",
         "仓耳小丸子.ttf",
         "STIXTwoMath-Regular.ttf",
+        "yahei.ttf",
+        "unifont.ttf",
+        "smSans.ttf",
     )
 
-    _CJK_FONT_CANDIDATES = (
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/truetype/arphic/uming.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/simhei.ttf",
-    )
-
-    _LATIN_FONT_CANDIDATES = (
+    _SYSTEM_TTF_CANDIDATES = (
+        # 注意：pillowmd 内部会用 fontTools.TTFont 读取字体；多数 .ttc
+        # 字体集合会报 “specify a font number”，所以这里只兜底 ttf/otf。
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "C:/Windows/Fonts/msyh.ttf",
+        "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/arial.ttf",
     )
 
-    def _find_existing_font(self, prefer_cjk: bool = True) -> Path | None:
-        candidates = self._CJK_FONT_CANDIDATES if prefer_cjk else self._LATIN_FONT_CANDIDATES
-        for candidate in candidates + (() if prefer_cjk else self._CJK_FONT_CANDIDATES):
-            path = Path(candidate)
-            if path.exists() and path.is_file():
+    def _pillowmd_font_dir(self) -> Path | None:
+        try:
+            return Path(pillowmd.__file__).resolve().parent / "data" / "fonts"
+        except Exception:
+            return None
+
+    def _font_candidates_for(self, target_name: str) -> list[Path]:
+        candidates: list[Path] = []
+        package_font_dir = self._pillowmd_font_dir()
+        if package_font_dir and package_font_dir.exists():
+            # 先拿 pillowmd 自带字体。它们一定是 pillowmd 自己能读的格式。
+            if target_name == "STIXTwoMath-Regular.ttf":
+                package_names = ["STIXTwoMath-Regular.ttf", "smSans.ttf", "yahei.ttf", "unifont.ttf"]
+            elif target_name in {"yahei.ttf", "unifont.ttf", "smSans.ttf"}:
+                package_names = [target_name, "smSans.ttf", "yahei.ttf", "unifont.ttf"]
+            else:
+                package_names = ["smSans.ttf", "yahei.ttf", "unifont.ttf"]
+            candidates.extend(package_font_dir / name for name in package_names)
+
+        candidates.extend(Path(path) for path in self._SYSTEM_TTF_CANDIDATES)
+        return candidates
+
+    def _find_existing_font(self, target_name: str) -> Path | None:
+        for path in self._font_candidates_for(target_name):
+            if path.exists() and path.is_file() and path.suffix.lower() in {".ttf", ".otf"}:
                 return path
         return None
 
@@ -2586,7 +2605,8 @@ class Sender:
             return style_dir
 
         fonts_dir = style_dir / "fonts"
-        if all((fonts_dir / name).exists() for name in self._DEFAULT_FONT_FILES):
+        missing_fonts = [name for name in self._DEFAULT_FONT_FILES if not (fonts_dir / name).exists()]
+        if not missing_fonts:
             return style_dir
 
         runtime_style_dir = self.cfg.data_dir / "default_style_runtime"
@@ -2595,19 +2615,18 @@ class Sender:
             shutil.copytree(style_dir, runtime_style_dir, dirs_exist_ok=True)
             runtime_fonts_dir.mkdir(parents=True, exist_ok=True)
 
-            cjk_font = self._find_existing_font(prefer_cjk=True)
-            latin_font = self._find_existing_font(prefer_cjk=False) or cjk_font
-            if not cjk_font and not latin_font:
-                logger.warning("default_style 缺少字体，且未找到可用系统字体；将尝试原样加载并可能降级纯文本")
-                return style_dir
-
             for name in self._DEFAULT_FONT_FILES:
-                src = latin_font if name == "STIXTwoMath-Regular.ttf" and latin_font else cjk_font or latin_font
+                src = self._find_existing_font(name)
                 dst = runtime_fonts_dir / name
                 if src and (not dst.exists() or dst.stat().st_size == 0):
                     shutil.copyfile(src, dst)
 
-            logger.info(f"default_style 缺少随仓库字体，已用系统字体生成运行时样式：{runtime_style_dir}")
+            still_missing = [name for name in self._DEFAULT_FONT_FILES if not (runtime_fonts_dir / name).exists()]
+            if still_missing:
+                logger.warning(f"default_style 缺少字体，且未找到可用替代字体 {still_missing}；将尝试原样加载并可能降级纯文本")
+                return style_dir
+
+            logger.info(f"default_style 缺少字体 {missing_fonts}，已用系统字体生成运行时样式：{runtime_style_dir}")
             return runtime_style_dir
         except Exception as e:
             logger.warning(f"生成运行时样式失败，将尝试原样加载并可能降级纯文本：{e}")
@@ -2742,6 +2761,7 @@ class Sender:
 
 import asyncio
 import random
+import re
 import time
 import zoneinfo
 from datetime import datetime, timedelta
@@ -2767,10 +2787,22 @@ class AutoRandomCronTask:
         self.timezone = timezone
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
         self.scheduler.start()
-        self.cron_expr = cron_expr
+        self.cron_expr = self._normalize_cron_expr(cron_expr)
         self.job_name = job_name
         self.register_task()
         logger.info(f"[{self.job_name}] 已启动，任务周期：{self.cron_expr}")
+
+    @staticmethod
+    def _normalize_cron_expr(cron_expr: str) -> str:
+        """兼容把 */8 误写/误存成 /8 或 * /8 的 cron。"""
+        expr = re.sub(r"\s+", " ", str(cron_expr or "").strip())
+        parts = expr.split(" ")
+        if len(parts) == 5:
+            parts = [("*" + part) if re.fullmatch(r"/\d+", part) else part for part in parts]
+            return " ".join(parts)
+        if len(parts) == 6 and parts[0] == "*" and re.fullmatch(r"/\d+", parts[1]):
+            return "*" + parts[1] + " " + " ".join(parts[2:])
+        return expr
 
     def register_task(self):
         try:
