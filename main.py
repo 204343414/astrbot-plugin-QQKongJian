@@ -673,6 +673,16 @@ class QzonePlugin(Star):
 
     @filter.llm_tool()
     async def llm_publish_feed(self, event: AiocqhttpMessageEvent, text: str = "", get_image: bool = True):
+        """发布/投稿一条 QQ 空间说说。
+
+        当用户明确要求“发说说”“投稿”“发布到QQ空间”“帮我发一条动态/空间”等，并且给出了要发布的内容时，应该调用本工具；不要改用只读访问空间工具。
+        普通用户投稿会自动经过 LLM 内容审核、冷却、每日次数限制和黑名单检查；管理员会直接发布。
+        如果用户只是在询问能否发布，应先询问正文；如果用户已经给出正文，例如“内容是 hello world”，应把正文作为 text 调用。
+
+        Args:
+            text(string): 要发布到 QQ 空间的说说正文。必须尽量提取用户真正想发布的内容，不要包含“帮我投稿/内容是”等指令外壳。例如用户说“帮我投稿一篇说说，内容是hello world”，text 应为“hello world”。
+            get_image(boolean): 是否尝试从当前消息或回复中提取图片并随说说一起发布。默认 true；纯文字投稿也可以保持 true。
+        """
         sender_id = event.get_sender_id()
         is_admin = str(sender_id) in self.cfg.admins_id
         if not bool(self.cfg.trigger.publish_everyone_enabled if self.cfg.trigger.publish_everyone_enabled is not None else True) and not is_admin:
@@ -745,6 +755,14 @@ class QzonePlugin(Star):
 
     @filter.llm_tool()
     async def llm_visit_friend_qzone(self, event: AiocqhttpMessageEvent, user_id: str | None = None):
+        """只读访问某个用户的 QQ 空间最新说说。
+
+        仅当用户要求“看看/访问/读取/查看某人的空间或最新说说”时使用本工具。本工具不会发布新说说、不会评论、不会点赞。
+        如果用户要求“发说说/投稿/发布动态”，不要调用本工具，应调用 llm_publish_feed。
+
+        Args:
+            user_id(string): 要访问的 QQ 号。留空时默认访问当前发消息用户的空间；如果用户 @ 了别人或明确给出 QQ 号，应传入对应 QQ 号。
+        """
         target_id = user_id or event.get_sender_id()
         try:
             posts = await self.service.query_feeds(target_id=target_id, pos=0, num=1, with_detail=True)
