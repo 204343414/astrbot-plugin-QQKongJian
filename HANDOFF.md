@@ -70,6 +70,24 @@ LLM 细审（判断封号风险）
 - `llm_list_my_publishes` — 只读，列出当前用户投稿清单，供 LLM 念给用户确认
 - `llm_withdraw_feed(tid)` — 撤回指定 tid；普通用户仅限自己投稿过的，管理员任意
 
+## 正文可点击 @好友（Round 26 新增）
+
+### 原理（不是单独 API，是正文里的富文本标记）
+QQ空间说说/评论正文（`con` 字段）里，@某人写成：
+```
+@{uin:QQ号,nick:昵称}
+```
+QQ空间渲染时就会显示成**蓝色、可点击、会提醒对方**的 @好友。
+- 依据1：腾讯手Q空间接口文档（open.mobile.qq.com）明确写“@某人要转成 : @{uin:183852032,nick:diaodiao}”。
+- 依据2：QzoneExporter 解析历史说说用的同款正则 `@\{uin:(\d+?),nick:(.+?),.*?\}`。
+
+### 实现（utils.py）
+- `make_qzone_at(uin, nick)`：生成 `@{uin:..,nick:..}`；无 uin 时退回纯文本 @昵称。
+- `convert_ats_to_qzone(event, text, at_map)`：把正文里的 `@QQ号` 和 `@昵称`（昵称来自消息里真实 At 段）转成可点击 @。
+- `build_command_publish_text(event, keywords)`：斜杠命令发说说时，从消息链按位置重建正文（message_str 会丢掉 At 段），就地转换。
+- 防伪造：转换前把用户原文里的 `@{` 打断成 `@ {`，避免有人手敲 `@{uin:..}` @ 到任意人。
+- 接入点：`/qq空间_发说说`（用 build_command_publish_text）、`llm_publish_feed`（用 convert_ats_to_qzone）。
+
 ## 审核超时 Bug 修复（Round 25）
 
 **问题**：旧逻辑里大模型超时 / 异常 / provider 不可用都会让 `_llm_review`

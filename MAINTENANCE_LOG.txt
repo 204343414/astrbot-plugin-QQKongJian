@@ -83,3 +83,28 @@ Round 25 - 2026-06-08
 
 注意：QzoneAPI.delete 用登录账号自身 uin 构造 topicId，只能删 bot 自己空间的说说，
 正好覆盖"投稿发布到 bot 空间"场景；跨账号鉴权在 main.py 层按 interaction_log 判断。
+
+Round 26 - 2026-06-08
+---------------------
+目标：让投稿正文里的 @某人 变成 QQ空间蓝色可点击、会提醒对方的 @好友。
+
+关键发现（钩子/格式）：
+- 这不是单独的 API，而是正文 con 字段里的富文本标记：@{uin:QQ号,nick:昵称}
+- 来源1：腾讯手Q空间接口文档 open.mobile.qq.com（TopicComment）：
+  “@某人要转成 : @{uin:183852032,nick:diaodiao}”
+- 来源2：QzoneExporter(template_filters.py) 解析历史说说同款正则：
+  @\{uin:(\d+?),nick:(.+?),.*?\}
+
+实现（utils.py 新增）：
+- make_qzone_at / sanitize_qzone_nick：生成并清洗 @{uin:..,nick:..}
+- build_at_map：从原生 At 段取 {uin:昵称}，昵称缺失时联网 get_nickname 补齐
+- convert_ats_to_qzone：转 @QQ号 和 @昵称（仅限消息里真 @ 过的人）
+- build_command_publish_text：斜杠命令按消息链位置重建正文并转换
+- 防伪造：转换前把用户原文 @{ 打断成 @ {
+
+接入（main.py）：
+- /qq空间_发说说 改用 build_command_publish_text 重建正文
+- llm_publish_feed 用 convert_ats_to_qzone 处理 LLM 传入的 text，并更新 docstring
+  告诉模型可直接在正文写 @QQ号，无需自己拼特殊格式
+
+已用纯函数单测覆盖：官方格式、@QQ号、@昵称、伪造打断、长数字不误伤、昵称含逗号/花括号清洗。

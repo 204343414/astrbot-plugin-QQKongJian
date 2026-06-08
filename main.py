@@ -53,7 +53,7 @@ from db import PostDB
 from parser import QzoneParser
 from qzone_session import QzoneSession
 from qzone_api import QzoneAPI
-from utils import get_ats, get_nickname, resolve_target_id, parse_range, get_image_urls, get_reply_message_str
+from utils import get_ats, get_nickname, resolve_target_id, parse_range, get_image_urls, get_reply_message_str, build_command_publish_text, convert_ats_to_qzone, build_at_map
 from llm_action import LLMAction
 from service import PostService
 from sender import Sender
@@ -497,7 +497,9 @@ class QzonePlugin(Star):
             yield event.plain_result(f"你今天已经让 bot 发过 {today_count} 条说说啦，明天再来～")
             return
 
-        text = event.message_str.partition(" ")[2].strip()
+        # 从消息链重建正文：把 @某人 转成 QQ空间可点击、会提醒对方的 @好友
+        # （message_str 会丢掉 At 段，所以不能直接用它）。
+        text = await build_command_publish_text(event, ["qq空间_发说说"])
         allow_images = bool(self.cfg.trigger.publish_with_image if self.cfg.trigger.publish_with_image is not None else True)
         images = await get_image_urls(event) if allow_images else []
         sender_name = event.get_sender_name() or sender_id
@@ -808,9 +810,10 @@ class QzonePlugin(Star):
         当用户明确要求“发说说”“投稿”“发布到QQ空间”“帮我发一条动态/空间”等，并且给出了要发布的内容时，应该调用本工具；不要改用只读访问空间工具。
         普通用户投稿会自动经过 LLM 内容审核、冷却、每日次数限制和黑名单检查；管理员会直接发布。
         如果用户只是在询问能否发布，应先询问正文；如果用户已经给出正文，例如“内容是 hello world”，应把正文作为 text 调用。
+        如果用户想在说说里 @某个好友：可以在 text 里直接写 @对方的QQ号（如“@123456 生日快乐”），或者保留用户消息里 @到的人的昵称；插件会自动把它转换成 QQ 空间里蓝色可点击、会提醒对方的 @好友。你不需要自己拼任何特殊格式。
 
         Args:
-            text(string): 要发布到 QQ 空间的说说正文。必须尽量提取用户真正想发布的内容，不要包含“帮我投稿/内容是”等指令外壳。例如用户说“帮我投稿一篇说说，内容是hello world”，text 应为“hello world”。
+            text(string): 要发布到 QQ 空间的说说正文。必须尽量提取用户真正想发布的内容，不要包含“帮我投稿/内容是”等指令外壳。例如用户说“帮我投稿一篇说说，内容是hello world”，text 应为“hello world”。如需 @好友，直接在正文相应位置写 @QQ号 即可。
             get_image(boolean): 是否尝试从当前消息或回复中提取图片并随说说一起发布。默认 true；纯文字投稿也可以保持 true。
         """
         sender_id = event.get_sender_id()
@@ -841,6 +844,14 @@ class QzonePlugin(Star):
                         break
             if not publish_text:
                 return "发布内容为空。请告诉我你想发什么内容，比如：'帮我发说说 今天天气真好'"
+
+        # 把正文里的 @某人 / @QQ号 转成 QQ空间可点击、会提醒对方的 @好友格式。
+        # at_map 取自触发本次发说说的那条消息里的原生 At 段（含 LLM 把 @昵称写进 text 的情况）。
+        try:
+            at_map = await build_at_map(event)
+            publish_text = await convert_ats_to_qzone(event, publish_text, at_map=at_map)
+        except Exception as e:
+            logger.warning(f"转换 @好友格式失败（按原文发布）：{e}")
 
         if not is_admin:
             if self.publish_review.is_banned(str(sender_id)):
