@@ -187,6 +187,47 @@ Round 27 - 2026-06-08
 - 加新拦截规则时，优先“拒绝本次”而不是“累计惩罚”，把不可逆操作（永久拉黑）
   的触发条件收得尽量窄、尽量只由明确的人为违规触发。
 
+【坑 8】方法名遮蔽内建类型 + 注解立即求值 = 类定义阶段炸
+- 现象：导入插件报 TypeError: 'function' object is not subscriptable，
+  栈停在某个 class 的某行类型注解（如 -> list[dict[str, Any]]）。
+- 根因：PostDB 里有个方法就叫 list()。类体内一旦执行过 def list，名字 list
+  在“类作用域”就被绑定成该函数，遮蔽了内建 list。若该 .py 顶部没有
+  `from __future__ import annotations`，类型注解会在类定义时**立即求值**，
+  在 def list 之后出现的 list[...] 注解就会去下标一个函数 → 报错。
+  （Round 28：新加的方法注解恰好排在 def list 之后，于是触发。）
+- 为什么 dist 不报、源码报：build.py 合并出的 dist/main.py 顶部统一有一行
+  __future__ annotations，把全文件注解都变惰性；而多文件源码里 db.py 当时没有。
+  → 教训：别假设“dist 编译过 = 多文件版也没问题”，两种形态都要验证。
+- 修复：给所有源模块补 `from __future__ import annotations`（已全部补齐）。
+  另外尽量别用 list/dict/type/id/filter 这种内建名当方法名/变量名。
+- 自测要点：py_compile 只查语法，**不执行类体**，抓不到这个坑；必须真正
+  import/exec 该模块（可 stub 掉外部依赖）才能在类定义阶段复现。
+
 一句话总结：本仓库的暗坑集中在 ①双形态构建(build.py) ②裸名import缓存
 ③系统错误 vs 用户违规 ④不可信文本进正文。守住这四条，基本不会出大事。
 祝后来者好运，アリガト —— by 上一任维护 AI
+
+Round 29 - 2026-06-08
+---------------------
+现象：投稿成功，但 bot 回显的预览卡片把正文里的 @{uin:..,nick:..} 原始标记
+直接画出来了（截图：今天是无畏的生日呀～ @{uin:3690855066,nick:3690855066}）。
+另外 nick 等于 QQ 号，说明被 @ 的人昵称没查到、回退成了号码。
+
+根因：
+1. @{uin:..,nick:..} 是“发往 QQ 空间正文”的可点击好友标记，QQ空间会渲染成
+   蓝色可点击；但 bot 自己回显的卡片不该显示原始标记。
+   model.Post.to_str() 对正文 self.text 只调了 remove_em_tags，没做 @ 标记美化
+   （评论区内容反而调了 extract_and_replace_nickname）。
+2. utils._resolve_member_name 在群里 @ 不在本群的人时，get_group_member_info
+   抛异常就直接回退 uin，没有再用 get_stranger_info 兜底。
+
+修复：
+- model.py 新增 beautify_at_for_display()：把 @{uin:..,nick:..} 美化成 @昵称，
+  昵称为空或等于 QQ 号时回退 @QQ号。仅用于展示（to_str），to_str 的 text/rt_con
+  都套上它。⚠️ 绝不能用在发往 QQ 空间的正文（post.text 原值）上，否则会丢可点击。
+  —— 显示美化(to_str) 与 发布原文(qzone_api.publish 用 post.text) 两条路径分离。
+- utils._resolve_member_name 增加 get_stranger_info 兜底，尽量查到真实昵称，
+  减少卡片显示成一串 QQ 号。
+
+自测：用 importlib exec model.py 构造 Post 验证 to_str 不再含 @{uin，显示 @昵称；
+beautify 函数对多 @、空昵称、昵称==QQ号、紧贴中文等用例全部正确。

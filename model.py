@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime as _dt
 import html as html_lib
 import re
@@ -47,6 +49,31 @@ def remove_em_tags(text):
     # 使用正则表达式匹配 [em]...[/em] 并替换为空字符串
     cleaned_text = re.sub(r"\[em\].*?\[/em\]", "", text)
     return cleaned_text
+
+
+# QQ空间正文里的可点击 @好友标记：@{uin:QQ号,nick:昵称}
+# 这种标记只应出现在“发往 QQ 空间的正文”里（QQ空间会渲染成蓝色可点击好友）；
+# bot 自己回显的预览卡片不该把原始标记画出来，要美化成 @昵称。
+_QZONE_AT_DISPLAY_RE = re.compile(r"@\{uin:(\d+),nick:(.*?)\}")
+
+
+def beautify_at_for_display(text: str) -> str:
+    """
+    把正文里的 @{uin:..,nick:..} 富文本标记美化成 @昵称，仅用于展示（卡片/通知）。
+    不要用在“发往 QQ 空间的正文”上——那里必须保留原始标记才能可点击。
+    - 昵称为空，或昵称就等于 QQ 号（说明当时没查到昵称）→ 回退成 @QQ号
+    """
+    if not text:
+        return text
+
+    def _repl(m: re.Match) -> str:
+        uin = m.group(1)
+        nick = (m.group(2) or "").strip()
+        if not nick or nick == uin:
+            return f"@{uin}"
+        return f"@{nick}"
+
+    return _QZONE_AT_DISPLAY_RE.sub(_repl, text)
 
 
 class Comment(BaseModel):
@@ -156,9 +183,9 @@ class Post(pydantic.BaseModel):
             f"### 【{self.id}】{self.name}{'投稿' if is_pending else '发布'}于{datetime.fromtimestamp(self.create_time).strftime('%Y-%m-%d %H:%M')}"
         ]
         if self.text:
-            lines.append(f"\n\n{remove_em_tags(self.text)}\n\n")
+            lines.append(f"\n\n{beautify_at_for_display(remove_em_tags(self.text))}\n\n")
         if self.rt_con:
-            lines.append(f"\n\n[转发]：{remove_em_tags(self.rt_con)}\n\n")
+            lines.append(f"\n\n[转发]：{beautify_at_for_display(remove_em_tags(self.rt_con))}\n\n")
         if self.images:
             images_str = "\n".join(f"  ![图片]({img})" for img in self.images)
             lines.append(images_str)

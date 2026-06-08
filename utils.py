@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import json
 import random
@@ -130,11 +132,20 @@ def make_qzone_at(uin, nick: str = "") -> str:
 
 
 async def _resolve_member_name(event: AiocqhttpMessageEvent, uin: str) -> str:
+    # 先按群名片/群昵称查（get_nickname）。如果被 @ 的人不在本群，
+    # get_group_member_info 会抛异常，此时再用 get_stranger_info 查全局昵称兜底，
+    # 尽量避免昵称查不到而回退成 QQ 号（卡片上显示成一串数字很难看）。
     try:
         name = await get_nickname(event, uin)
-        return name or ""
+        if name:
+            return name
     except Exception as e:
-        logger.debug(f"解析 @ 对象昵称失败 uin={uin}: {e}")
+        logger.debug(f"按群成员解析 @ 对象昵称失败 uin={uin}: {e}")
+    try:
+        info = await event.bot.get_stranger_info(user_id=int(uin))
+        return (info.get("nickname") or "").strip()
+    except Exception as e:
+        logger.debug(f"按陌生人解析 @ 对象昵称失败 uin={uin}: {e}")
         return ""
 
 

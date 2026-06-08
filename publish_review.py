@@ -10,6 +10,8 @@
 6. 同一用户 10 分钟内只能投 1 次（防刷）
 """
 
+from __future__ import annotations
+
 import json
 import re
 import time

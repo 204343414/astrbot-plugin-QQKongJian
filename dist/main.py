@@ -304,6 +304,31 @@ def remove_em_tags(text):
     return cleaned_text
 
 
+# QQ空间正文里的可点击 @好友标记：@{uin:QQ号,nick:昵称}
+# 这种标记只应出现在“发往 QQ 空间的正文”里（QQ空间会渲染成蓝色可点击好友）；
+# bot 自己回显的预览卡片不该把原始标记画出来，要美化成 @昵称。
+_QZONE_AT_DISPLAY_RE = re.compile(r"@\{uin:(\d+),nick:(.*?)\}")
+
+
+def beautify_at_for_display(text: str) -> str:
+    """
+    把正文里的 @{uin:..,nick:..} 富文本标记美化成 @昵称，仅用于展示（卡片/通知）。
+    不要用在“发往 QQ 空间的正文”上——那里必须保留原始标记才能可点击。
+    - 昵称为空，或昵称就等于 QQ 号（说明当时没查到昵称）→ 回退成 @QQ号
+    """
+    if not text:
+        return text
+
+    def _repl(m: re.Match) -> str:
+        uin = m.group(1)
+        nick = (m.group(2) or "").strip()
+        if not nick or nick == uin:
+            return f"@{uin}"
+        return f"@{nick}"
+
+    return _QZONE_AT_DISPLAY_RE.sub(_repl, text)
+
+
 class Comment(BaseModel):
     """QQ 空间单条评论（含主评论与楼中楼）"""
 
@@ -411,9 +436,9 @@ class Post(pydantic.BaseModel):
             f"### 【{self.id}】{self.name}{'投稿' if is_pending else '发布'}于{datetime.fromtimestamp(self.create_time).strftime('%Y-%m-%d %H:%M')}"
         ]
         if self.text:
-            lines.append(f"\n\n{remove_em_tags(self.text)}\n\n")
+            lines.append(f"\n\n{beautify_at_for_display(remove_em_tags(self.text))}\n\n")
         if self.rt_con:
-            lines.append(f"\n\n[转发]：{remove_em_tags(self.rt_con)}\n\n")
+            lines.append(f"\n\n[转发]：{beautify_at_for_display(remove_em_tags(self.rt_con))}\n\n")
         if self.images:
             images_str = "\n".join(f"  ![图片]({img})" for img in self.images)
             lines.append(images_str)
@@ -2115,11 +2140,20 @@ def make_qzone_at(uin, nick: str = "") -> str:
 
 
 async def _resolve_member_name(event: AiocqhttpMessageEvent, uin: str) -> str:
+    # 先按群名片/群昵称查（get_nickname）。如果被 @ 的人不在本群，
+    # get_group_member_info 会抛异常，此时再用 get_stranger_info 查全局昵称兜底，
+    # 尽量避免昵称查不到而回退成 QQ 号（卡片上显示成一串数字很难看）。
     try:
         name = await get_nickname(event, uin)
-        return name or ""
+        if name:
+            return name
     except Exception as e:
-        logger.debug(f"解析 @ 对象昵称失败 uin={uin}: {e}")
+        logger.debug(f"按群成员解析 @ 对象昵称失败 uin={uin}: {e}")
+    try:
+        info = await event.bot.get_stranger_info(user_id=int(uin))
+        return (info.get("nickname") or "").strip()
+    except Exception as e:
+        logger.debug(f"按陌生人解析 @ 对象昵称失败 uin={uin}: {e}")
         return ""
 
 
