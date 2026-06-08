@@ -3402,8 +3402,19 @@ class PublishReview:
 
     @staticmethod
     def build_attribution_text(user_id: str, nickname: str, text: str) -> str:
+        # 投稿归属用 QQ空间可点击 @好友标记：@{uin:投稿人QQ号,nick:安全昵称}
+        # 这样发到空间后，“【来自 @某人 的投稿】”里的名字是蓝色超链接，
+        # 别人点一下就能跳到投稿人主页，找到具体是谁。
+        # 昵称仍经 _safe_attribution_name 清洗（防广告/引流/链接昵称被带进空间，
+        # 且已滤掉 {} 和逗号，不会破坏标记结构）。
         safe_name = PublishReview._safe_attribution_name(user_id, nickname)
-        prefix = f"【来自 @{safe_name} 的投稿】"
+        uid = re.sub(r"\D", "", str(user_id or ""))
+        if uid:
+            attribution = "@{uin:%s,nick:%s}" % (uid, safe_name)
+        else:
+            # 拿不到有效 QQ 号时退回纯文本，至少不丢信息
+            attribution = f"@{safe_name}"
+        prefix = f"【来自 {attribution} 的投稿】"
         return f"{prefix}\n\n{text}" if text else prefix
 
     def __init__(self, config: PluginConfig, db: PostDB, llm: LLMAction):

@@ -231,3 +231,24 @@ Round 29 - 2026-06-08
 
 自测：用 importlib exec model.py 构造 Post 验证 to_str 不再含 @{uin，显示 @昵称；
 beautify 函数对多 @、空昵称、昵称==QQ号、紧贴中文等用例全部正确。
+
+Round 30 - 2026-06-08
+---------------------
+需求澄清（上一轮 r29 理解反了）：用户其实喜欢 @{uin:..,nick:..}——因为它在
+QQ 空间里是蓝色可点击超链接，点一下能跳到具体的人。用户希望投稿归属标题
+【来自 @xxx 的投稿】里的 @xxx 就用这个可点击格式，方便别人点名字找到投稿人。
+
+改动（publish_review.build_attribution_text）：
+- 归属名从纯文本 @safe_name 改为可点击 @{uin:投稿人QQ号,nick:safe_name}。
+- safe_name 仍走 _safe_attribution_name 清洗（防广告/引流昵称进空间；该清洗已滤掉
+  {} 和逗号，不会破坏标记结构）；uin 用投稿人真实 QQ 号，保证点击能跳到本人。
+- 拿不到有效 QQ 号时退回纯文本 @safe_name。
+
+与 r29 的关系（不冲突，正好互补）：
+- 发到 QQ 空间的正文/归属：保留 @{uin:..} 原始标记 → 空间里可点击。
+- bot 自己回显的预览卡片：model.beautify_at_for_display 仍会把它美化成 @昵称，
+  所以卡片干净、空间可点击，两边都满意。
+
+注意（环境坑）：本轮开始时本地 git 历史落后于远端（沙箱快照导致 commit 对象未持久化，
+但工作区文件是最新的）。处理：git fetch 远端后 soft reset 到远端 SHA，再把工作区
+真实差异作为新 commit 叠加，避免历史分叉/内容丢失。push 后不要再 amend 已推送的 commit。
