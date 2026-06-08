@@ -103,7 +103,10 @@ QQ空间渲染时就会显示成**蓝色、可点击、会提醒对方**的 @好
 1. **保守修改**：尽量不动已有功能，优先新增模块
 2. **单文件不超千行**：每个 .py 文件保持 500-1000 行以内
 3. **模块职责清晰**：db只管DB，parser只管解析，service只管业务逻辑
-4. **import 保持一致**：所有同级模块用 `from xxx import yyy`（无点前缀）
+4. **import 保持一致**：所有同级模块用 `from xxx import yyy`（无点前缀）；
+   每个 .py 顶部都要有 `from __future__ import annotations`（避免“方法名遮蔽内建类型 +
+   注解立即求值”导致类定义阶段 TypeError，详见维护日志坑 8），且避免用
+   list/dict/id/filter 等内建名当方法名/变量名
 5. **维护日志写文件**：不在 main.py 里写长篇注释，而是记录到对应模块
 6. **动手前先读 MAINTENANCE_LOG.txt 末尾的「给后来 AI 维护者的避坑指南」**：
    集中记录了本仓库的暗坑（双形态构建 build.py、裸名 import 的 sys.modules 缓存、

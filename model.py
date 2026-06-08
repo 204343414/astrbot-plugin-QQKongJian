@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime as _dt
 import html as html_lib
 import re

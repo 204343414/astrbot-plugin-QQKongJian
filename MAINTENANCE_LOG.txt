@@ -187,6 +187,22 @@ Round 27 - 2026-06-08
 - 加新拦截规则时，优先“拒绝本次”而不是“累计惩罚”，把不可逆操作（永久拉黑）
   的触发条件收得尽量窄、尽量只由明确的人为违规触发。
 
+【坑 8】方法名遮蔽内建类型 + 注解立即求值 = 类定义阶段炸
+- 现象：导入插件报 TypeError: 'function' object is not subscriptable，
+  栈停在某个 class 的某行类型注解（如 -> list[dict[str, Any]]）。
+- 根因：PostDB 里有个方法就叫 list()。类体内一旦执行过 def list，名字 list
+  在“类作用域”就被绑定成该函数，遮蔽了内建 list。若该 .py 顶部没有
+  `from __future__ import annotations`，类型注解会在类定义时**立即求值**，
+  在 def list 之后出现的 list[...] 注解就会去下标一个函数 → 报错。
+  （Round 28：新加的方法注解恰好排在 def list 之后，于是触发。）
+- 为什么 dist 不报、源码报：build.py 合并出的 dist/main.py 顶部统一有一行
+  __future__ annotations，把全文件注解都变惰性；而多文件源码里 db.py 当时没有。
+  → 教训：别假设“dist 编译过 = 多文件版也没问题”，两种形态都要验证。
+- 修复：给所有源模块补 `from __future__ import annotations`（已全部补齐）。
+  另外尽量别用 list/dict/type/id/filter 这种内建名当方法名/变量名。
+- 自测要点：py_compile 只查语法，**不执行类体**，抓不到这个坑；必须真正
+  import/exec 该模块（可 stub 掉外部依赖）才能在类定义阶段复现。
+
 一句话总结：本仓库的暗坑集中在 ①双形态构建(build.py) ②裸名import缓存
 ③系统错误 vs 用户违规 ④不可信文本进正文。守住这四条，基本不会出大事。
 祝后来者好运，アリガト —— by 上一任维护 AI
