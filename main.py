@@ -26,6 +26,27 @@ from pathlib import Path
 _plugin_dir = Path(__file__).resolve().parent
 if str(_plugin_dir) not in sys.path:
     sys.path.insert(0, str(_plugin_dir))
+else:
+    # 确保本插件目录在最前，避免被同名目录抢先
+    sys.path.remove(str(_plugin_dir))
+    sys.path.insert(0, str(_plugin_dir))
+
+# ⚠️ 兄弟模块隔离：本插件用裸名 import（from utils import ...）导入同级模块。
+# 这些名字（utils/config/db...）很通用，Python 的 sys.modules 是全局缓存，会引发：
+#   1) 插件热重载：旧版本的 utils 残留在 sys.modules，新加的函数导入不到，
+#      报 “cannot import name build_command_publish_text from utils”；
+#   2) 跨插件撞名：别的插件也有同名 utils.py 时互相顶替。
+# 解决：在导入兄弟模块之前，把这些同名模块从 sys.modules 里**无条件**清掉，
+# 强制接下来的 import 从本插件目录（已置于 sys.path[0]）重新读取最新文件。
+# 这些模块都是“定义函数/类”的无状态模块，重新导入是安全的；下面紧接着就会
+# 按依赖顺序重新 import 它们。
+_SIBLING_MODULE_NAMES = (
+    "config", "model", "db", "parser", "qzone_session", "qzone_client",
+    "qzone_api", "utils", "llm_action", "service", "sender", "scheduler",
+    "publish_review",
+)
+for _name in _SIBLING_MODULE_NAMES:
+    sys.modules.pop(_name, None)
 
 import asyncio
 import random
