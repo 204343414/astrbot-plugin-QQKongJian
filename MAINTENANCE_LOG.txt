@@ -58,3 +58,28 @@ Round 24 - 2026-06-03
 用户投稿 → 黑名单检查 → 关键词粗筛 → LLM 细审 → 通过/拒绝
   - 通过：自动加 "【来自 xxx 的投稿】" 标注后发布
   - 拒绝：记一次违规，累计 3 次后永久拉黑
+
+Round 25 - 2026-06-08
+---------------------
+目标：
+- 修复"大模型审核超时被误判为违规、累计3次永久拉黑"的 bug
+- 新增"撤回投稿"能力（用户撤自己的、管理员撤任意，先列清单再确认）
+
+审核超时 bug 修复（publish_review.py）：
+- ReviewResult 新增 ERROR 状态，与 REJECTED 严格区分。
+- _llm_review 在超时/异常/provider不可用时返回 error=True（系统侧问题）。
+- submit() 命中 error 时只返回 ERROR：不记违规、不计入拉黑阈值、不进冷却。
+- 只有 LLM 明确判定内容违规才 add_strike。
+- main.py 的 publish_feed / llm_publish_feed 对 ERROR 提示"稍后再试，未记违规"。
+
+撤回投稿（db.py / service.py / main.py）：
+- db.list_published_by_actor()：按 actor_uin 从 interaction_log 列出投稿（含撤回过滤）。
+- db.is_published_by_actor()：撤回鉴权。
+- db.delete_by_tid()：本地缓存清理。
+- service.withdraw_post(tid)：调用已有 QzoneAPI.delete 撤回 + 清缓存。
+- 命令：/qq空间_我的投稿、/qq空间_撤回投稿（支持序号/tid，管理员可撤任意）。
+- LLM 工具：llm_list_my_publishes（只读列清单）、llm_withdraw_feed(tid)（撤回）。
+- 撤回记 action='withdraw' 到 interaction_log。
+
+注意：QzoneAPI.delete 用登录账号自身 uin 构造 topicId，只能删 bot 自己空间的说说，
+正好覆盖"投稿发布到 bot 空间"场景；跨账号鉴权在 main.py 层按 interaction_log 判断。

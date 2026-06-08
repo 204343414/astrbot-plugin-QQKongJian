@@ -31,6 +31,11 @@ class ReviewResult:
     APPROVED = "approved"
     REJECTED = "rejected"
     BANNED = "banned"
+    # 系统错误（LLM 超时 / 异常 / provider 不可用）。
+    # 注意：ERROR 与 REJECTED 语义完全不同——
+    #   REJECTED = 内容确实有问题（记违规、计入拉黑阈值）
+    #   ERROR    = 审核流程本身没跑成功（绝不记违规、绝不拉黑、绝不进冷却）
+    ERROR = "error"
 
     def __init__(self, status: str, reason: str = "", publish_text: str = "", strikes: int = 0):
         self.status = status
@@ -203,6 +208,23 @@ class PublishReview:
             nickname=nickname,
             attribution_name=attribution_name,
         )
+
+        # ⚠️ 关键修复：区分“系统错误”和“内容违规”。
+        # 大模型超时 / 异常 / provider 不可用属于系统错误（error=True），
+        # 这种情况下：不记违规、不计入拉黑阈值、不进冷却（让用户能立刻重试），
+        # 只返回 ERROR 让上层提示“稍后再试”。
+        # 旧逻辑把超时也当成违规 add_strike，导致超时 3 次就被永久拉黑——正是要修的 bug。
+        if llm_result.get("error"):
+            logger.warning(
+                f"[PublishReview] 用户 {user_id} 投稿审核未完成（系统问题，不记违规）: "
+                f"{llm_result.get('reason', '')}"
+            )
+            return ReviewResult(
+                status=ReviewResult.ERROR,
+                reason=llm_result.get("reason", "审核服务暂时不可用，请稍后再试"),
+                strikes=self._strikes.get(user_id, 0),
+            )
+
         if not llm_result["approved"]:
             await self.add_strike(user_id, reason=f"LLM审核不通过: {llm_result.get('reason', '')}")
             self._last_submit_ts[user_id] = now
@@ -254,8 +276,10 @@ class PublishReview:
             or self.cfg.context.get_using_provider()
         )
         if not isinstance(provider, Provider):
-            logger.warning("[PublishReview] LLM 提供商不可用，审核不放行")
-            return {"approved": False, "reason": "LLM不可用，无法完成审核"}
+            # provider 不可用属于“系统侧问题”，不是用户内容违规。
+            # 标记 error=True，让上层只拒绝、不记违规、不拉黑。
+            logger.warning("[PublishReview] LLM 提供商不可用，无法完成审核（不记违规）")
+            return {"approved": False, "error": True, "reason": "LLM不可用，无法完成审核"}
 
         prompt = self._render_review_prompt(
             content=content, text=text, image_count=image_count,
@@ -277,9 +301,15 @@ class PublishReview:
             )
             result_text = response.completion_text.strip()
             return self._parse_llm_result(result_text)
+        except asyncio.TimeoutError as e:
+            # 大模型超时 = 系统侧问题，绝不能当成用户违规。
+            # 这正是“超时累计 3 次被永久拉黑”的 bug 根因，标记 error=True。
+            logger.error(f"[PublishReview] LLM 审核超时: {e}（系统问题，不记违规）")
+            return {"approved": False, "error": True, "reason": "审核超时，请稍后再试"}
         except Exception as e:
-            logger.error(f"[PublishReview] LLM 审核异常: {e}，审核不放行")
-            return {"approved": False, "reason": f"LLM异常，无法完成审核: {e}"}
+            # 其它异常同样是系统侧问题（网络、provider 报错等），不记违规。
+            logger.error(f"[PublishReview] LLM 审核异常: {e}（系统问题，不记违规）")
+            return {"approved": False, "error": True, "reason": f"审核服务暂时不可用，请稍后再试"}
 
     def _parse_llm_result(self, text: str) -> dict[str, Any]:
         text = text.strip()

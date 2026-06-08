@@ -345,3 +345,100 @@ class PostDB:
             cur = await db.execute("DELETE FROM posts WHERE id = ?", (post_id,))
             await db.commit()
             return cur.rowcount
+
+    async def delete_by_tid(self, tid: str) -> int:
+        """按 tid 删除稿件"""
+        if not tid:
+            return 0
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute("DELETE FROM posts WHERE tid = ?", (str(tid),))
+            await db.commit()
+            return cur.rowcount
+
+    async def list_published_by_actor(
+        self,
+        actor_uin: str | int,
+        *,
+        limit: int = 10,
+        include_withdrawn: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        列出某个用户成功发布过的投稿（按时间倒序，最新在前）。
+
+        数据来源是 interaction_log 里 action='publish' 的记录（actor_uin 即投稿人），
+        再 LEFT JOIN posts 拿到正文/图片做预览。
+
+        include_withdrawn=False 时，会排除掉该用户已经撤回过的 tid
+        （即存在 action='withdraw' 且同 tid、同 actor 的记录）。
+
+        返回每条：{tid, text, image_count, created_at, withdrawn}
+        """
+        actor = str(actor_uin)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT il.tid,
+                       MAX(il.created_at) AS pub_time,
+                       p.text,
+                       p.images
+                FROM interaction_log il
+                LEFT JOIN posts p ON p.tid = il.tid
+                WHERE il.action = 'publish'
+                  AND il.actor_uin = ?
+                  AND il.tid IS NOT NULL
+                GROUP BY il.tid
+                ORDER BY pub_time DESC
+                LIMIT ?
+                """,
+                (actor, int(max(1, limit)) * 3),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+            # 查出该用户已撤回的 tid 集合
+            withdrawn_tids: set[str] = set()
+            async with db.execute(
+                "SELECT DISTINCT tid FROM interaction_log WHERE action = 'withdraw' AND actor_uin = ? AND tid IS NOT NULL",
+                (actor,),
+            ) as cursor:
+                for r in await cursor.fetchall():
+                    if r[0]:
+                        withdrawn_tids.add(str(r[0]))
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            tid = str(row[0]) if row[0] else ""
+            if not tid:
+                continue
+            is_withdrawn = tid in withdrawn_tids
+            if is_withdrawn and not include_withdrawn:
+                continue
+            text = row[2] or ""
+            try:
+                images = json.loads(row[3]) if row[3] else []
+            except Exception:
+                images = []
+            result.append({
+                "tid": tid,
+                "text": text,
+                "image_count": len(images) if isinstance(images, list) else 0,
+                "created_at": int(row[1] or 0),
+                "withdrawn": is_withdrawn,
+            })
+            if len(result) >= limit:
+                break
+        return result
+
+    async def is_published_by_actor(self, actor_uin: str | int, tid: str) -> bool:
+        """判断某条 tid 是否确实是该用户投稿发布的（用于撤回鉴权）。"""
+        if not tid:
+            return False
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT 1 FROM interaction_log
+                WHERE action = 'publish' AND actor_uin = ? AND tid = ?
+                LIMIT 1
+                """,
+                (str(actor_uin), str(tid)),
+            ) as cur:
+                return await cur.fetchone() is not None

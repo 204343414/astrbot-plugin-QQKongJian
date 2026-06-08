@@ -522,6 +522,11 @@ class QzonePlugin(Star):
                 yield event.plain_result("你的投稿权限已被限制，无法继续投稿。")
                 return
 
+            # 审核流程本身没跑成功（大模型超时/异常/不可用）→ 不算违规，提示稍后重试。
+            if review.status == review.ERROR:
+                yield event.plain_result(f"审核服务暂时不可用，没有记你违规，请稍后再试。原因：{review.reason}")
+                return
+
             publish_text = review.publish_text
             if not publish_text:
                 if review.strikes >= self.publish_review.BAN_THRESHOLD:
@@ -692,6 +697,108 @@ class QzonePlugin(Star):
         status = "🚫 已封禁" if banned else f"✅ 正常（违规 {strikes}/{self.publish_review.BAN_THRESHOLD} 次）"
         yield event.plain_result(f"用户 {target} 投稿状态：{status}")
 
+    # ---- 撤回投稿 ----
+
+    def _fmt_publish_time(self, ts: int) -> str:
+        if not ts:
+            return "未知时间"
+        try:
+            return datetime.fromtimestamp(int(ts), self.cfg.timezone).strftime("%m-%d %H:%M")
+        except Exception:
+            return "未知时间"
+
+    @staticmethod
+    def _preview_text(text: str, limit: int = 40) -> str:
+        t = (text or "").replace("\n", " ").strip()
+        if not t:
+            return "（无文字内容）"
+        return t if len(t) <= limit else t[:limit] + "…"
+
+    def _render_publish_list(self, records: list[dict]) -> str:
+        """把投稿列表渲染成带序号的文本，供用户选择撤回哪条。"""
+        lines = []
+        for i, r in enumerate(records, 1):
+            img = f"｜{r['image_count']}图" if r.get("image_count") else ""
+            lines.append(
+                f"{i}. [{self._fmt_publish_time(r['created_at'])}{img}] "
+                f"{self._preview_text(r['text'])}\n   tid: {r['tid']}"
+            )
+        return "\n".join(lines)
+
+    @filter.command("qq空间_我的投稿", alias={"qq空间_投稿列表"})
+    async def my_publishes(self, event: AiocqhttpMessageEvent):
+        """查看自己最近发布成功的投稿（含 tid，便于撤回）。"""
+        sender_id = str(event.get_sender_id())
+        records = await self.db.list_published_by_actor(sender_id, limit=10)
+        if not records:
+            yield event.plain_result("你还没有成功发布过投稿哦～")
+            return
+        yield event.plain_result(
+            "你最近发布成功的投稿：\n" + self._render_publish_list(records) +
+            "\n\n撤回用法：/qq空间_撤回投稿 <序号>  或  /qq空间_撤回投稿 <tid>"
+        )
+
+    @filter.command("qq空间_撤回投稿", alias={"qq空间_撤稿", "qq空间_删投稿"})
+    async def withdraw_publish(self, event: AiocqhttpMessageEvent, arg: str = ""):
+        """撤回自己投稿过的说说；管理员可撤回任意说说。
+
+        用法：
+          /qq空间_撤回投稿            → 列出自己的投稿
+          /qq空间_撤回投稿 <序号>     → 撤回列表里的第 N 条
+          /qq空间_撤回投稿 <tid>      → 按 tid 撤回
+          管理员：/qq空间_撤回投稿 <tid> 可撤回任意说说
+        """
+        sender_id = str(event.get_sender_id())
+        is_admin = sender_id in self.cfg.admins_id
+        arg = (arg or "").strip()
+
+        # 取该用户的投稿列表（用于序号选择和鉴权展示）
+        records = await self.db.list_published_by_actor(sender_id, limit=10)
+
+        # 无参数：展示列表引导
+        if not arg:
+            if not records and not is_admin:
+                yield event.plain_result("你还没有成功发布过投稿，没有可撤回的内容～")
+                return
+            hint = ""
+            if records:
+                hint = "你最近的投稿：\n" + self._render_publish_list(records) + "\n\n"
+            extra = "（管理员可直接用 tid 撤回任意说说）" if is_admin else ""
+            yield event.plain_result(
+                hint + f"请告诉我要撤回哪条：/qq空间_撤回投稿 <序号或tid> {extra}"
+            )
+            return
+
+        # 解析目标 tid
+        target_tid = ""
+        if arg.isdigit() and 1 <= int(arg) <= len(records):
+            # 纯数字且落在列表序号范围内 → 当作序号
+            target_tid = records[int(arg) - 1]["tid"]
+        else:
+            # 否则当作 tid
+            target_tid = arg
+
+        # 鉴权：普通用户只能撤自己投稿过的；管理员任意
+        if not is_admin:
+            owned = any(r["tid"] == target_tid for r in records) or \
+                await self.db.is_published_by_actor(sender_id, target_tid)
+            if not owned:
+                yield event.plain_result("只能撤回你自己投稿过的说说哦，这条不在你的投稿记录里～")
+                return
+
+        try:
+            await self.service.withdraw_post(target_tid)
+            await self.db.log_interaction(
+                action="withdraw",
+                source="manual_withdraw_admin" if is_admin else "manual_withdraw",
+                tid=target_tid, actor_uin=sender_id,
+                group_id=event.get_group_id(),
+            )
+            yield event.plain_result(f"已撤回说说（tid: {target_tid}）✅")
+        except Exception as e:
+            logger.error(f"撤回投稿失败：{e}")
+            yield event.plain_result(f"撤回失败：{e}")
+
     # ---- LLM 工具 ----
 
     @filter.llm_tool()
@@ -744,6 +851,9 @@ class QzonePlugin(Star):
             )
             if review.status == review.BANNED:
                 return "你的投稿权限已被限制，无法继续投稿。"
+            # 审核流程本身没跑成功（大模型超时/异常/不可用）→ 不算违规，提示稍后重试。
+            if review.status == review.ERROR:
+                return f"审核服务暂时不可用，没有记你违规，请稍后再试。原因：{review.reason}"
             publish_text = review.publish_text
             if not publish_text:
                 if review.strikes >= self.publish_review.BAN_THRESHOLD:
@@ -813,3 +923,76 @@ class QzonePlugin(Star):
             f"图片数：{len(post.images)}，视频数：{len(post.videos)}\n"
             "安全说明：本工具没有评论、没有点赞。请用自然语气告诉用户已查看。"
         )
+
+    @filter.llm_tool()
+    async def llm_list_my_publishes(self, event: AiocqhttpMessageEvent):
+        """列出当前用户最近通过本 bot 成功发布到 QQ 空间的投稿。
+
+        当用户想“撤回/删除我发过的说说”，但没有明确指出要撤哪一条时，应先调用本工具拿到投稿清单，
+        再用自然语言把这些投稿（时间、内容摘要）念给用户听，请他确认要撤回哪一条；
+        确认后再调用 llm_withdraw_feed 撤回。
+
+        本工具是只读的，不会删除任何内容。
+        """
+        sender_id = str(event.get_sender_id())
+        records = await self.db.list_published_by_actor(sender_id, limit=10)
+        if not records:
+            return "该用户最近没有通过本 bot 成功发布过投稿，没有可撤回的内容。"
+        lines = []
+        for i, r in enumerate(records, 1):
+            img = f"，{r['image_count']}张图" if r.get("image_count") else ""
+            lines.append(
+                f"{i}. 发布时间 {self._fmt_publish_time(r['created_at'])}{img}；"
+                f"内容：{self._preview_text(r['text'], 50)}；tid={r['tid']}"
+            )
+        return (
+            "该用户最近的投稿如下（最新在前）：\n" + "\n".join(lines) +
+            "\n\n请用自然语言把上面的投稿告诉用户，让他确认要撤回哪一条（可以报序号或内容），"
+            "确认后调用 llm_withdraw_feed 并传入对应的 tid。不要擅自替用户决定撤哪条。"
+        )
+
+    @filter.llm_tool()
+    async def llm_withdraw_feed(self, event: AiocqhttpMessageEvent, tid: str = ""):
+        """撤回（删除）一条已经发布到 QQ 空间的投稿说说。
+
+        使用前提：必须已经知道要撤回的具体说说 tid。如果用户没有指明撤哪条，
+        应先调用 llm_list_my_publishes 拿到清单并让用户确认，拿到 tid 后再调用本工具。
+
+        权限：普通用户只能撤回自己投稿过的说说；管理员可以撤回任意说说。
+        本工具会真实删除 QQ 空间里的说说，请在用户明确确认后再调用。
+
+        Args:
+            tid(string): 要撤回的说说 tid（从 llm_list_my_publishes 的结果里获取）。必填。
+        """
+        sender_id = str(event.get_sender_id())
+        is_admin = sender_id in self.cfg.admins_id
+        tid = (tid or "").strip()
+
+        if not tid:
+            # 没给 tid：尝试帮用户列出投稿引导确认
+            records = await self.db.list_published_by_actor(sender_id, limit=10)
+            if not records:
+                return "没有提供要撤回的说说 tid，且该用户也没有可撤回的投稿记录。"
+            return (
+                "缺少要撤回的说说 tid。请先用 llm_list_my_publishes 把用户的投稿列出来，"
+                "让用户确认具体撤哪一条，再带上对应 tid 调用本工具。"
+            )
+
+        # 鉴权：普通用户只能撤自己投稿过的
+        if not is_admin:
+            owned = await self.db.is_published_by_actor(sender_id, tid)
+            if not owned:
+                return "这条说说不在该用户的投稿记录里，普通用户只能撤回自己投稿过的说说，已拒绝撤回。"
+
+        try:
+            await self.service.withdraw_post(tid)
+            await self.db.log_interaction(
+                action="withdraw",
+                source="llm_withdraw_admin" if is_admin else "llm_withdraw",
+                tid=tid, actor_uin=sender_id,
+                group_id=event.get_group_id(),
+            )
+            return f"已成功撤回该说说（tid: {tid}）。请用自然语气告诉用户撤回成功。"
+        except Exception as e:
+            logger.error(f"LLM撤回投稿失败：{e}")
+            return f"撤回失败：{e}"

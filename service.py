@@ -127,6 +127,25 @@ class PostService:
         await self.db.save(post)
         logger.info(f"评论 -> {post.name}")
 
+    async def withdraw_post(self, tid: str) -> None:
+        """
+        撤回（删除）一条自己空间的说说。
+
+        说明：QzoneAPI.delete 内部使用登录账号自身的 uin 构造 topicId，
+        因此只能删除 bot 账号自己空间里的说说——这正好覆盖“投稿发布到 bot 空间”
+        的场景。鉴权（谁能撤谁的稿）在上层（main.py）依据 interaction_log 判断。
+        """
+        if not tid:
+            raise ValueError("tid 为空，无法撤回")
+        resp = await self.qzone.delete(str(tid))
+        if not resp.ok:
+            raise RuntimeError(f"撤回说说失败：{resp.message or resp.data}")
+        # 同步清理本地缓存里的该条说说
+        try:
+            await self.db.delete_by_tid(str(tid))
+        except Exception as e:
+            logger.warning(f"撤回后清理本地记录失败（不影响撤回结果）：{e}")
+
     async def publish_post(self, *, post: Post | None = None, text: str | None = None,
                             images: list | None = None) -> Post:
         """发表帖子（支持 Post / text / images，但不能为空）"""
