@@ -129,6 +129,68 @@ Round 27 - 2026-06-08
 @{uin:..,nick:..} 蓝色可点击好友 @，且整条投稿本身仍带“【来自 @xxx 的投稿】”
 归属标注，可追溯是谁投的，因此保持开放（可 @ 死党/情侣发生日祝福）。
 
+
+Round 31 - 2026-06-14
+---------------------
+需求：用户反馈「自动探测用户空间时, 检测到对方没对 bot 开空间却没能写入 ignore_users」。
+根因（旧代码）：
+- `_find_latest_post_for_group_show` 三个 fallback 只有最后一个匹配 "不存在" 字符串,
+  其他两个 fallback 失败 / 关键词不匹配都不会写入 ignore。
+- `_get_posts`（手动命令）在查询前就无条件 `remove_ignore_users(target_id)`,
+  即使查询失败（对方根本不可访问）也会被静默移出 ignore 列表。
+- `_random_friend_interact` 的 ignore 写入关键词太少, 仅 `Empty/不存在/权限` 三个。
+- 没有 friend 事件监听, `_cleanup_ignore_users_by_friend_list_once` 仅首次概率触发跑一次,
+  之后再加好友也不会自动清理 ignore。
+
+修复（main.py）：
+- 新增模块级 helper: `_INACCESSIBLE_SPACE_KEYWORDS` / `_LOGIN_ERROR_KEYWORDS` /
+  `_looks_like_inaccessible_space(err, code=)` / `_looks_like_login_error(err)`。
+  关键词覆盖: 无权限/权限不足/权限/私密/不可见/拒绝访问/受限/forbidden/access denied/
+  未开通/未开放/未对您/对方没有/对方空间/开放空间/对您设置了权限/仅好友/查无此人/账号不存在/
+  账号已注销/用户不存在/QQ号不存在/该用户/Empty/not found/not open/closed/private。
+  同时 code=403/-403/-5/-6/4 视为不可访问。登录/会话失效（登录/skey/g_tk/cookie/expired）
+  显式排除，避免把会话问题误判成"对方不可访问"。
+  （参考 Zhalslar/astrbot_plugin_qzone 的 `_map_feed_error` 实现思路。）
+- 新增类方法: `_record_unreadable_user(target_id, *, reason, source)` 统一写入入口。
+- 新增类方法: `_cleanup_ignore_users_by_friend_list(*, force=False)` 30 分钟冷却的清理；
+  保留旧的 `_cleanup_ignore_users_by_friend_list_once`（首次概率触发兼容用）。
+- 新增类方法: `_on_friend_added(user_id)` 清理 ignore（让下次探测重新判定）。
+- 改造 `_find_latest_post_for_group_show`：三个 fallback 都接 `_record_unreadable_user`，
+  关键词不再是只匹配 "不存在"。
+- 改造 `_random_friend_interact`：失败时走新 helper（关键词更全）。
+- 改造 `_get_posts`：去掉查询前的无条件 `remove_ignore_users`，改为查询成功才移除；
+  查询失败时若是空间不可访问 → 写入 ignore。
+- 改造 `llm_visit_friend_qzone`：同上模式（查询成功移除, 失败按关键词写 ignore）。
+- 新增 friend 事件监听 `on_request_event`（仿 auto_approve_all）：监听 aiocqhttp 的
+  request_type="friend" 事件, 调用 `set_friend_add_request(approve=True)` 自动同意,
+  同意后调用 `_on_friend_added` 清理 ignore。群邀请默认不处理（QQ空间插件不该替用户
+  决定加群, 避免误进群）。
+- `prob_read_feed` 在首次清理之外, 顺带按冷却窗口再做一次清理, 让新增好友关系
+  能在 30 分钟内被自动移出 ignore。
+- `initialize()` 启动时调用一次清理（force=True）。此时 `self.cfg.client` 通常还没注入,
+  `_cleanup_ignore_users_by_friend_list` 会自动跳过, 等到第一个事件或下个冷却时自动补救。
+
+新增配置（_conf_schema.json / config.py / TriggerConfig）：
+- `auto_approve_friend_request`: bool, 默认 true — 是否在好友事件里自动同意好友申请。
+- `ignore_user_cleanup_on_friend_change`: bool, 默认 true — 成为好友时是否清理 ignore。
+
+自测（tests/test_ignore_users.py / tests/smoke_import.py）：
+- 覆盖不可访问关键词 13 个 / 登录错误 6 个 / code 403 系列 4 个 / 中性错误 5 个，
+  全部断言通过。
+- 用 importlib 真 exec 加载 main.py 和 dist/main.py，验证：
+  - 类体不抛 TypeError（坑 8）；
+  - 新 helper `_looks_like_inaccessible_space` 在两种部署形态下行为一致；
+  - 类方法 `_record_unreadable_user` / `_on_friend_added` / `on_request_event`
+    / `_cleanup_ignore_users_by_friend_list` 全部挂载。
+
+避坑提示（追加给后来 AI 维护者）：
+- 旧 `_get_posts` 的"查询前 remove_ignore"是反直觉设计：哪怕对方根本不可访问,
+  也会被静默移出。新逻辑是「查询成功才移除」+「查询失败若是不可访问则写入」。
+- 关键词列表要把"对方没有对您开放空间"这类自然语言报错也覆盖进去, 不能只信
+  官方 code；QQ 空间接口的 message 经常是中文自由文本。
+- `_INACCESSIBLE_SPACE_KEYWORDS` 和 `_LOGIN_ERROR_KEYWORDS` 是排他关系：登录失效
+  显式 False（避免把会话失效错杀成"对方不可访问"）。
+
 ============================================================
 给后来 AI 维护者的避坑指南（务必先读，按踩坑概率排序）
 ============================================================

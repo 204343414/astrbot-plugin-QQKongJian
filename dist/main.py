@@ -160,6 +160,10 @@ class TriggerConfig(ConfigNode):
     publish_with_attribution: bool
     # 新增：投稿配图开关
     publish_with_image: bool
+    # 新增：自动同意好友申请
+    auto_approve_friend_request: bool
+    # 新增：成为好友时清理 ignore_users
+    ignore_user_cleanup_on_friend_change: bool
 
 
 class PluginConfig(ConfigNode):
@@ -3717,6 +3721,79 @@ from astrbot.core.star.star_tools import StarTools
 # ---- 内部模块 ----
 
 # ============================================================
+# 空间可访问性判定（参考 Zhalslar/astrbot_plugin_qzone 的 _map_feed_error）
+# ============================================================
+
+# 错误关键词：QQ 空间 API 返回"对方没对 bot 开放空间 / 私密 / 无权限"等语义时会出现
+_INACCESSIBLE_SPACE_KEYWORDS: tuple[str, ...] = (
+    "无权限",
+    "权限不足",
+    "权限",
+    "私密",
+    "不可见",
+    "拒绝访问",
+    "受限",
+    "forbidden",
+    "access denied",
+    "未开通",
+    "未开放",
+    "未对您",
+    "对您",
+    "对方没有",
+    "对方空间",
+    "开放空间",
+    "设置权限",
+    "设置了权限",
+    "仅好友",
+    "查无此人",
+    "查无此",
+    "账号不存在",
+    "账号已注销",
+    "用户不存在",
+    "QQ号不存在",
+    "该用户",
+    "Empty",
+    "not found",
+    "not open",
+    "closed",
+    "private",
+)
+
+# 区分：登录/会话失效不算"对方不可访问"，避免错误写入 ignore
+_LOGIN_ERROR_KEYWORDS: tuple[str, ...] = (
+    "登录",
+    "失效",
+    "skey",
+    "g_tk",
+    "cookie",
+    "expired",
+    "重新登录",
+    "未登录",
+)
+
+
+def _looks_like_inaccessible_space(err: BaseException | str, *, code: Any = None) -> bool:
+    """判断一条 API 错误是否表示「对方没对 bot 开放空间 / 不可访问」"""
+    # 显式 code：QQ 空间 API 权限不足通常返回 403 / -403 / -5
+    if code in (403, -403, -5, -6, 4):
+        return True
+    msg = str(err or "").lower()
+    if not msg:
+        return False
+    # 登录/会话失效优先返回 False，避免把会话问题当成"对方不可访问"
+    if any(kw.lower() in msg for kw in _LOGIN_ERROR_KEYWORDS):
+        return False
+    return any(kw.lower() in msg for kw in _INACCESSIBLE_SPACE_KEYWORDS)
+
+
+def _looks_like_login_error(err: BaseException | str) -> bool:
+    msg = str(err or "").lower()
+    if not msg:
+        return False
+    return any(kw.lower() in msg for kw in _LOGIN_ERROR_KEYWORDS)
+
+
+# ============================================================
 # AstrBot插件入口：QzonePlugin
 # ============================================================
 
@@ -3746,6 +3823,7 @@ class QzonePlugin(Star):
         # 概率触发锁
         self._prob_lock = asyncio.Lock()
         self._ignore_cleanup_done = False
+        self._ignore_cleanup_last_ts: float = 0.0
         self._prob_last_interact_ts: float = 0.0
         self._prob_daily_key: str = ""
         self._prob_daily_count: int = 0
@@ -3760,6 +3838,10 @@ class QzonePlugin(Star):
         # 初始化投稿审核模块
         self.publish_review = PublishReview(self.cfg, self.db, self.llm)
         await self.publish_review.initialize()
+        # 启动时立即清理一次 ignore_users（把已经成为好友的 QQ 从列表中移除）。
+        # 注意：self.cfg.client 此时可能还没注入（要等第一个事件），
+        # 所以 _cleanup_ignore_users_by_friend_list 会自动跳过；会在 prob_read_feed / friend 事件 / 下次冷却时自动补救。
+        await self._cleanup_ignore_users_by_friend_list(force=True)
 
     async def terminate(self):
         """插件卸载时"""
@@ -3788,6 +3870,69 @@ class QzonePlugin(Star):
                 logger.info(f"已从忽略列表移除已成为好友的用户：{removable}")
         except Exception as e:
             logger.debug(f"清理忽略列表失败：{e}")
+
+    async def _cleanup_ignore_users_by_friend_list(self, *, force: bool = False):
+        """带冷却的清理：成为好友的用户从 ignore_users 移除。
+
+        - force=True：跳过冷却（用于初始化时立即执行一次）。
+        - 其它情况：默认 30 分钟冷却，避免反复 get_friend_list 浪费接口配额。
+        """
+        cleanup_on_friend_change = bool(
+            getattr(self.cfg.trigger, "ignore_user_cleanup_on_friend_change", True)
+        )
+        if not cleanup_on_friend_change:
+            return
+        if not self.cfg.client:
+            return
+        now = time.time()
+        if not force and self._ignore_cleanup_last_ts and now - self._ignore_cleanup_last_ts < 1800:
+            return
+        self._ignore_cleanup_last_ts = now
+        try:
+            friend_list = await self.cfg.client.get_friend_list()
+            friend_ids = {str(f.get("user_id")) for f in friend_list}
+            removable = [uid for uid in list(self.cfg.source.ignore_users) if str(uid) in friend_ids]
+            if removable:
+                self.cfg.remove_ignore_users(removable)
+                logger.info(f"已从忽略列表移除已成为好友的用户：{removable}")
+        except Exception as e:
+            logger.debug(f"清理忽略列表失败：{e}")
+
+    def _record_unreadable_user(self, target_id: str, *, reason: str, source: str) -> bool:
+        """把探测失败（空间不可访问）的用户加入忽略列表。
+
+        Returns: 是否成功写入（已存在则不重复写入）。
+        """
+        if not target_id:
+            return False
+        uid = str(target_id).strip()
+        if not uid.isdigit():
+            return False
+        if self.cfg.source.is_ignore_user(uid):
+            return False
+        self.cfg.append_ignore_users(uid)
+        # 取一段简短的原因摘要
+        summary = (reason or "").strip().replace("\n", " ")
+        if len(summary) > 80:
+            summary = summary[:80] + "…"
+        logger.info(
+            f"[{source}] 探测 QQ {uid} 空间失败/不可访问，已加入忽略列表。reason={summary}"
+        )
+        return True
+
+    async def _on_friend_added(self, user_id: str) -> None:
+        """bot 与某人成为好友时调用：清理 ignore_users（让下次探测重新判定）。"""
+        cleanup_on_friend_change = bool(
+            getattr(self.cfg.trigger, "ignore_user_cleanup_on_friend_change", True)
+        )
+        if not cleanup_on_friend_change:
+            return
+        uid = str(user_id or "").strip()
+        if not uid.isdigit():
+            return
+        if self.cfg.source.is_ignore_user(uid):
+            self.cfg.remove_ignore_users(uid)
+            logger.info(f"已成为好友 QQ {uid}，已从忽略列表移除（下次探测会重新判定）")
 
     def _today_start_ts(self) -> int:
         now = datetime.now(self.cfg.timezone)
@@ -3876,7 +4021,14 @@ class QzonePlugin(Star):
                     return p, "\n".join(diagnostics)
             diagnostics.append("好友动态流未命中；最近解析到的uin=" + ",".join(recent_uins[:12]))
         except Exception as e:
-            diagnostics.append(f"好友动态流读取失败：{e}")
+            err_msg = str(e)
+            diagnostics.append(f"好友动态流读取失败：{err_msg}")
+            # 好友动态流是全局接口，失败原因不一定是 target_id 本身的问题（例如会话失效/风控）。
+            # 仅在错误信息明确指向"无权限/私密/不可见"时, 才把 target_id 加入 ignore。
+            if not _looks_like_login_error(err_msg) and _looks_like_inaccessible_space(err_msg):
+                self._record_unreadable_user(
+                    target_id, reason=err_msg, source="probe_feed_stream"
+                )
 
         try:
             posts = await self.service.query_feeds(
@@ -3887,7 +4039,12 @@ class QzonePlugin(Star):
                 diagnostics.append(f"个人主页详情接口命中 tid={posts[0].tid}")
                 return posts[0], "\n".join(diagnostics)
         except Exception as e:
-            diagnostics.append(f"个人主页详情读取错误：{e}")
+            err_msg = str(e)
+            diagnostics.append(f"个人主页详情读取错误：{err_msg}")
+            if not _looks_like_login_error(err_msg) and _looks_like_inaccessible_space(err_msg):
+                self._record_unreadable_user(
+                    target_id, reason=err_msg, source="probe_personal_detail"
+                )
 
         try:
             posts = await self.service.query_feeds(
@@ -3898,9 +4055,12 @@ class QzonePlugin(Star):
                 diagnostics.append(f"个人主页列表接口命中 tid={posts[0].tid}")
                 return posts[0], "\n".join(diagnostics)
         except Exception as e:
-            diagnostics.append(f"个人主页列表读取错误：{e}")
-            if "不存在" in str(e):
-                self.cfg.append_ignore_users(target_id)
+            err_msg = str(e)
+            diagnostics.append(f"个人主页列表读取错误：{err_msg}")
+            if not _looks_like_login_error(err_msg) and _looks_like_inaccessible_space(err_msg):
+                self._record_unreadable_user(
+                    target_id, reason=err_msg, source="probe_personal_list"
+                )
 
         return None, "\n".join(diagnostics)
 
@@ -3973,6 +4133,8 @@ class QzonePlugin(Star):
         if self.cfg.source.is_ignore_group(str(group_id)):
             return
         await self._cleanup_ignore_users_by_friend_list_once()
+        # 顺带按冷却窗口再做一次（不强制），让新增的好友关系能在 30 分钟内被自动清理出 ignore 列表。
+        await self._cleanup_ignore_users_by_friend_list()
         sender_id = event.get_sender_id()
         if self.cfg.source.is_ignore_user(sender_id):
             return
@@ -4003,6 +4165,61 @@ class QzonePlugin(Star):
                 source="auto_group_prob", force=False,
             )
 
+    # ---- 好友申请 / 群邀请监听（仿 auto_approve_all）----
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    async def on_request_event(self, event: AstrMessageEvent):
+        """
+        监听 QQ 后端的 "request" 事件：
+          - request_type == "friend"            → 自动同意好友申请 + 清理 ignore_users
+          - request_type == "group" + invite    → 自动同意群邀请（可选，默认关闭，避免误进群）
+        设计思路：
+          1) set_friend_add_request / set_group_add_request 是幂等的，
+             即使和别的自动同意插件共存也不会重复处理（多次 approve=true 仍 ok）。
+          2) 成为好友后, 如果对方之前在 ignore_users 里(探测过发现空间不可访问),
+             就把他移出去, 让下次概率触发/cron/LLM访问重新判定。
+             若重新探测仍不可访问, 探测本身又会把他加回 ignore_users —— 自愈闭环。
+          3) 群邀请默认关闭：QQ空间插件的主要职责是好友+说说, 不该替用户做加群决策。
+             管理员可在配置文件里手动启用 auto_approve_group_invite。
+        """
+        try:
+            raw_message = getattr(event.message_obj, "raw_message", None)
+        except Exception:
+            raw_message = None
+        if not isinstance(raw_message, dict) or raw_message.get("post_type") != "request":
+            return
+        if not isinstance(event, AiocqhttpMessageEvent):
+            return
+
+        client = event.bot
+        flag = raw_message.get("flag")
+        user_id = str(raw_message.get("user_id") or "")
+        request_type = raw_message.get("request_type")
+        sub_type = raw_message.get("sub_type")
+
+        # 好友申请：自动同意 + 清理 ignore_users
+        if request_type == "friend" and flag:
+            auto_approve = bool(
+                getattr(self.cfg.trigger, "auto_approve_friend_request", True)
+            )
+            if not auto_approve:
+                return
+            try:
+                await client.set_friend_add_request(flag=flag, approve=True)
+                logger.info(f"已自动同意好友申请 from {user_id}")
+            except Exception as e:
+                logger.error(f"自动同意好友申请失败：{e}")
+                return
+            # 同意成功后：清理 ignore_users（让下次探测重新判定）
+            await self._on_friend_added(user_id)
+            return
+
+        # 群邀请：默认不处理（QQ空间插件不该替用户加群）；保留扩展位。
+        if request_type == "group" and sub_type == "invite" and flag:
+            # 如需开启, 在 TriggerConfig 加字段 auto_approve_group_invite。
+            # 留空函数, 不做默认行为, 避免误进群。
+            return
+
     # ---- 辅助方法 ----
 
     async def _get_posts(self, event: AiocqhttpMessageEvent, *,
@@ -4013,8 +4230,6 @@ class QzonePlugin(Star):
         at_ids = get_ats(event)
         if not target_id:
             target_id = at_ids[0] if at_ids else None
-        if target_id:
-            self.cfg.remove_ignore_users(target_id)
         try:
             logger.debug(f"正在查询说说： {target_id, pos, num, with_detail, no_commented, no_self}")
             posts = await self.service.query_feeds(
@@ -4024,10 +4239,23 @@ class QzonePlugin(Star):
             if not posts:
                 await event.send(event.plain_result("查询结果为空"))
                 event.stop_event()
+                return posts
+            # 查询成功（拿到有效 posts）：把目标从 ignore 列表移除（说明现在能看到空间了）。
+            # 之前这里是"查询前就 remove"，会让 ignore 列表失去意义——
+            # 哪怕对方根本不可访问, 也会被静默移出。
+            if target_id:
+                self.cfg.remove_ignore_users(target_id)
             return posts
         except Exception as e:
-            await event.send(event.plain_result(str(e)))
-            logger.error(e)
+            err_msg = str(e)
+            # 查询失败：若是空间不可访问（无权限/私密/不可见等）→ 写入 ignore；
+            # 若是登录失效/网络抖动 → 不要写入 ignore，留给下次重试。
+            if target_id and not _looks_like_login_error(err_msg) and _looks_like_inaccessible_space(err_msg):
+                self._record_unreadable_user(
+                    target_id, reason=err_msg, source="manual_view"
+                )
+            await event.send(event.plain_result(err_msg))
+            logger.error(err_msg)
             event.stop_event()
             return []
 
@@ -4098,8 +4326,10 @@ class QzonePlugin(Star):
             except Exception as e:
                 logger.debug(f"跳过好友 {fid}：{e}")
                 err_msg = str(e)
-                if "Empty" in err_msg or "不存在" in err_msg or "权限" in err_msg:
-                    self.cfg.append_ignore_users(fid)
+                if not _looks_like_login_error(err_msg) and _looks_like_inaccessible_space(err_msg):
+                    self._record_unreadable_user(
+                        fid, reason=err_msg, source="random_friend_interact"
+                    )
                 await asyncio.sleep(1)
                 continue
             if not posts:
@@ -4569,11 +4799,17 @@ class QzonePlugin(Star):
         except Exception as e:
             err_msg = str(e)
             logger.warning(f"LLM工具只读访问空间失败: {err_msg}")
-            if "Empty" in err_msg or "无权" in err_msg or "不可见" in err_msg or "不存在" in err_msg:
+            # 查询失败：若是空间不可访问 → 写入 ignore（下次概率触发不再探测）。
+            if not _looks_like_login_error(err_msg) and _looks_like_inaccessible_space(err_msg):
+                self._record_unreadable_user(
+                    target_id, reason=err_msg, source="llm_visit"
+                )
                 return "访问失败：对方可能没有开放QQ空间权限，或者内容不可见。"
             return f"访问出错了：{err_msg}"
         if not posts:
             return "访问成功，但是空间是空的，最近没有发说说。"
+        # 查询成功：把目标从 ignore 列表移除（说明现在能看到空间了）。
+        self.cfg.remove_ignore_users(target_id)
         post = posts[0]
         safe_to_forward, unsafe_reason = await self.llm.review_post_for_forward(post)
         if not safe_to_forward:

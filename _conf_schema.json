@@ -56,7 +56,7 @@
             "ignore_users": {
                 "description": "忽略的用户列表",
                 "type": "list",
-                "hint": "Bot在随机触发读说说时, 如果发现用户未开放空间, 则自动将该用户加入忽略列表, 下次不再处理该用户",
+                "hint": "Bot在探测某用户空间时，如果发现该用户未对Bot开放空间/无可见说说/账号不可访问，则自动把该QQ加入此列表，下次探测直接跳过，不浪费接口配额。当对方成为Bot好友时会自动从该列表移除(若仍不可见，下次探测会再次被加回)。你也可以手工添加/删除QQ号。",
                 "default": []
             },
             "post_max_msg": {
@@ -184,6 +184,18 @@
                     "step": 1
                 },
                 "default": 5
+            },
+            "auto_approve_friend_request": {
+                "description": "是否自动同意好友申请",
+                "type": "bool",
+                "hint": "开启后, 当 bot 收到好友申请时会自动 set_friend_add_request(approve=True); 同意后, 如果对方之前在 ignore_users 里, 会自动移除(让下次探测重新判定)。如果你已经启用了其它自动同意好友的插件/配置, 可以关闭本项以避免冲突。",
+                "default": true
+            },
+            "ignore_user_cleanup_on_friend_change": {
+                "description": "成为好友时是否自动清理忽略列表",
+                "type": "bool",
+                "hint": "开启后, 任何时候发现 bot 与某人成为好友(无论是通过自动同意、好友事件还是定时扫描好友列表), 都会把对方QQ从 ignore_users 中移除。这样对方重新开放空间后能正常被探测到。",
+                "default": true
             }
         }
     },

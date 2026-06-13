@@ -133,6 +133,10 @@ class TriggerConfig(ConfigNode):
     publish_with_attribution: bool
     # 新增：投稿配图开关
     publish_with_image: bool
+    # 新增：自动同意好友申请
+    auto_approve_friend_request: bool
+    # 新增：成为好友时清理 ignore_users
+    ignore_user_cleanup_on_friend_change: bool
 
 
 class PluginConfig(ConfigNode):

@@ -117,6 +117,46 @@ QQ空间渲染时就会显示成**蓝色、可点击、会提醒对方**的 @好
 - `h5.qzone.qq.com/...msglist_v6` 无有效 qzonetoken 时返回"使用人数过多"
 - 群展示优先走好友动态流 `get_recent_feeds()`，找不到再 fallback 个人主页接口
 
+## 忽略用户列表（ignore_users）自动维护
+
+### 触发条件
+1. **自动探测失败**：群聊概率触发（prob_read_feed）/ cron 扫空间（AutoComment 调用前的
+   service.query_feeds）/ 手动命令（_get_posts / llm_visit_friend_qzone）/ 随机好友互动
+   （_random_friend_interact）任何一个接口探测某用户空间失败, 且错误信息命中
+   `_INACCESSIBLE_SPACE_KEYWORDS`（无权限/私密/不可见/对您设置了权限/仅好友/对方没有
+   对您开放空间...）→ 自动把该 QQ 加入 ignore_users（持久化到配置文件）。
+2. **成为好友时清理**：bot 与某人成为好友时（通过 `on_request_event` 自动同意, 或
+   `_cleanup_ignore_users_by_friend_list` 30 分钟冷却扫描好友列表, 或插件 initialize 启动时）
+   → 把对方从 ignore_users 移除（让下次探测重新判定）。如果探测仍失败, 探测本身会再次
+   把对方加回 ignore_users —— 形成自愈闭环。
+3. **手动命令成功时清理**：手动 `/qq空间_看说说 @某人` 真正读到内容时, 把目标从
+   ignore_users 移除（之前是"查询前就 remove", 让列表失去意义, 已修复）。
+
+### 不会写入 ignore 的情况
+- 登录/会话失效（关键词命中 `_LOGIN_ERROR_KEYWORDS`：登录/skey/g_tk/cookie/expired）。
+  这种情况是 bot 自己的问题, 不该怪到对方头上。
+- HTTP 5xx / 网络超时 / JSON 解析失败。属于临时故障, 不应该持久写入。
+- code 不在 (403, -403, -5, -6, 4) 且关键词也没命中。
+
+### 自愈闭环
+```
+用户 A 探测失败 ─→ A 加入 ignore_users
+            │
+            ▼
+某次清理触发 / 加好友 / 探测重新发起 ─→ A 从 ignore_users 移除
+            │
+            ▼
+探测 A 仍失败 ─→ A 重新加入 ignore_users (自愈)
+探测 A 成功 ─→ A 留在 ignore_users 外
+```
+
+### 配置项
+- `source.ignore_users`：手动维护的列表 (你也可以手工添加/删除 QQ)。
+- `trigger.auto_approve_friend_request`：默认 true；关闭则本插件不自动同意好友申请,
+  但 ignore 清理逻辑仍会监听 friend 事件（如果别处自动同意了, 这里照样清理）。
+- `trigger.ignore_user_cleanup_on_friend_change`：默认 true；成为好友时是否清理 ignore。
+
+
 ## 当前安全机制
 - `interaction_log` 记录 space_comment、space_like、group_show、publish、auto_probe
 - 同一条说说不重复评论
