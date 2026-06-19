@@ -776,6 +776,20 @@ class QzonePlugin(Star):
                 yield event.plain_result(f"审核服务暂时不可用，没有记你违规，请稍后再试。原因：{review.reason}")
                 return
 
+            # 严重违规：记违规 +1，提示用户
+            if review.status == review.VIOLATION:
+                remaining = self.publish_review.BAN_THRESHOLD - review.strikes
+                if remaining <= 0:
+                    yield event.plain_result("投稿内容涉及严重违规，已被禁止发布，且你的投稿权限已被永久限制。")
+                else:
+                    yield event.plain_result(f"投稿内容涉及严重违规，已被禁止发布。这是你第 {review.strikes} 次违规，累计 {self.publish_review.BAN_THRESHOLD} 次将永久限制投稿权限。原因：{review.reason}")
+                return
+
+            # 普通驳回：不发布，不记违规
+            if review.status == review.REJECTED:
+                yield event.plain_result(f"投稿审核未通过，请修改后重新投稿。原因：{review.reason}")
+                return
+
             publish_text = review.publish_text
             if not publish_text:
                 if review.strikes >= self.publish_review.BAN_THRESHOLD:
@@ -925,13 +939,39 @@ class QzonePlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("qq空间_解封投稿")
     async def unban_publish(self, event: AiocqhttpMessageEvent, uid: str = ""):
-        """管理员解封用户投稿权限"""
+        """管理员解封用户投稿权限。
+        用法：/qq空间_解封投稿 @用户 或 /qq空间_解封投稿 <QQ号>
+        或：/qq空间_解封投稿 all → 清空所有人的投稿违规记录（解封所有被封禁用户）
+        """
         target = uid or (get_ats(event)[0] if get_ats(event) else "")
         if not target:
-            yield event.plain_result("用法：/qq空间_解封投稿 @用户 或 /qq空间_解封投稿 <QQ号>")
+            yield event.plain_result("用法：/qq空间_解封投稿 @用户 或 /qq空间_解封投稿 <QQ号>，或 /qq空间_解封投稿 all（清空所有人）")
+            return
+        if target.lower() == "all":
+            cleared = await self.publish_review.clear_all_strikes()
+            yield event.plain_result(f"已清空所有 {cleared} 个用户的投稿违规记录，所有人已解封。")
             return
         await self.publish_review.clear_strikes(target)
         yield event.plain_result(f"用户 {target} 已解封投稿权限。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("qq空间_ban列表")
+    async def ban_list(self, event: AiocqhttpMessageEvent):
+        """查看投稿违规/Ban 列表"""
+        if not self.publish_review:
+            yield event.plain_result("投稿审核模块未初始化。")
+            return
+        records = self.publish_review.get_all_strike_records()
+        if not records:
+            yield event.plain_result("当前没有任何用户有投稿违规记录。")
+            return
+        lines = [f"📋 投稿违规/Ban 列表（共 {len(records)} 人）："]
+        for r in records:
+            icon = "🚫" if r["banned"] else "⚠️"
+            status = "已封禁" if r["banned"] else f"{r['strikes']}/{self.publish_review.BAN_THRESHOLD}"
+            reason_str = f" | 最近原因：{r['reason']}" if r.get("reason") else ""
+            lines.append(f"{icon} QQ {r['user_id']}：违规 {status} 次{reason_str}")
+        yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("qq空间_审核状态")
@@ -943,7 +983,12 @@ class QzonePlugin(Star):
             return
         strikes = self.publish_review.get_strikes(target)
         banned = self.publish_review.is_banned(target)
-        status = "🚫 已封禁" if banned else f"✅ 正常（违规 {strikes}/{self.publish_review.BAN_THRESHOLD} 次）"
+        if banned:
+            status = f"🚫 已封禁（违规 {strikes}/{self.publish_review.BAN_THRESHOLD} 次）"
+        elif strikes > 0:
+            status = f"⚠️ 有违规记录（{strikes}/{self.publish_review.BAN_THRESHOLD} 次，再 {self.publish_review.BAN_THRESHOLD - strikes} 次将被封禁）"
+        else:
+            status = "✅ 正常（无违规记录）"
         yield event.plain_result(f"用户 {target} 投稿状态：{status}")
 
     # ---- 撤回投稿 ----
@@ -1054,20 +1099,24 @@ class QzonePlugin(Star):
     async def llm_publish_feed(self, event: AiocqhttpMessageEvent, text: str = "", get_image: bool = True):
         """发布/投稿一条 QQ 空间说说（支持多图，最多 9 张）。
 
-        【核心逻辑】当用户明确要求“发说说”“投稿”“发布到QQ空间”“帮我发一条动态/空间”等，并且给出了要发布的内容时，应该调用本工具；不要改用只读访问空间工具。
+        【核心逻辑】当用户明确要求"发说说""投稿""发布到QQ空间""帮我发一条动态/空间"等，并且给出了要发布的内容时，应该调用本工具；不要改用只读访问空间工具。
         普通用户投稿会自动经过 LLM 内容审核、冷却、每日次数限制和黑名单检查；管理员会直接发布。
-        如果用户只是在询问能否发布，应先询问正文；如果用户已经给出正文，例如“内容是 hello world”，应把正文作为 text 调用。
-        如果用户想在说说里 @某个好友：可以在 text 里直接写 @对方的QQ号（如“@123456 生日快乐”），或者保留用户消息里 @到的人的昵称；插件会自动把它转换成 QQ 空间里蓝色可点击、会提醒对方的 @好友。你不需要自己拼任何特殊格式。
+        如果用户只是在询问能否发布，应先询问正文；如果用户已经给出正文，例如"内容是 hello world"，应把正文作为 text 调用。
+        如果用户想在说说里 @某个好友：可以在 text 里直接写 @对方的QQ号（如"@123456 生日快乐"），或者保留用户消息里 @到的人的昵称；插件会自动把它转换成 QQ 空间里蓝色可点击、会提醒对方的 @好友。你不需要自己拼任何特殊格式。
 
-        【图片处理关键说明】：
+        【图片确认关键规则】：
         - 本工具只能从 **当前这条消息** 或 **被回复的那条消息** 中提取图片。
-        - 如果用户在上一条消息发了图，然后在这条消息说“投稿xxx”，**不会** 自动带上上一条消息的图（除非用户把这条消息作为回复发送）。
+        - 在调用本工具之前，你必须确认用户要投稿的说说是否带图：
+          1. 如果用户提到了图片、发了图、或者说"有图"/"配图"/"附图"等 → 必须再确认一次："请问你要投稿的内容带图吗？如果带图，请**引用/回复**包含图片的那条消息，或者把图片和文字放在同一条消息里发给我。"
+          2. 确认后，如果用户确实带图了 → 你需要判断带了几张图（1-9张），并在调用工具时把 get_image 设为 true。
+          3. 如果用户确认不带图 → 你可以把 get_image 设为 false，但依然正常调用本工具发布纯文字说说。
+        - 如果用户在上一条消息发了图，然后在这条消息说"投稿xxx"，**不会** 自动带上上一条消息的图（除非用户把这条消息作为回复发送）。
         - 因此：当用户表达要投稿/发说说，但**当前消息链里没有图片、也没有回复包含图片的消息**时，你必须主动提示用户：
-          “请**引用/回复**包含图片的那条消息，或者把图片和文字放在同一条消息里发给我。”
+          "请**引用/回复**包含图片的那条消息，或者把图片和文字放在同一条消息里发给我。"
         - 支持多图投稿（最多 9 张），会按消息里的顺序上传。
 
         Args:
-            text(string): 要发布到 QQ 空间的说说正文。必须尽量提取用户真正想发布的内容，不要包含“帮我投稿/内容是”等指令外壳。例如用户说“帮我投稿一篇说说，内容是hello world”，text 应为“hello world”。如需 @好友，直接在正文相应位置写 @QQ号 即可。
+            text(string): 要发布到 QQ 空间的说说正文。必须尽量提取用户真正想发布的内容，不要包含"帮我投稿/内容是"等指令外壳。例如用户说"帮我投稿一篇说说，内容是hello world"，text 应为"hello world"。如需 @好友，直接在正文相应位置写 @QQ号 即可。
             get_image(boolean): 是否尝试从当前消息或回复中提取图片并随说说一起发布。默认 true；纯文字投稿也可以保持 true。若当前消息无图且无回复图片，将发布纯文字说说。
         """
         sender_id = event.get_sender_id()
@@ -1119,6 +1168,15 @@ class QzonePlugin(Star):
             # 审核流程本身没跑成功（大模型超时/异常/不可用）→ 不算违规，提示稍后重试。
             if review.status == review.ERROR:
                 return f"审核服务暂时不可用，没有记你违规，请稍后再试。原因：{review.reason}"
+            # 严重违规：记违规 +1，提示用户
+            if review.status == review.VIOLATION:
+                remaining = self.publish_review.BAN_THRESHOLD - review.strikes
+                if remaining <= 0:
+                    return "投稿内容涉及严重违规，已被禁止发布，且你的投稿权限已被永久限制。"
+                return f"投稿内容涉及严重违规，已被禁止发布。这是你第 {review.strikes} 次违规，累计 {self.publish_review.BAN_THRESHOLD} 次将永久限制投稿权限。原因：{review.reason}"
+            # 普通驳回：不发布，不记违规
+            if review.status == review.REJECTED:
+                return f"投稿审核未通过，请修改后重新投稿。原因：{review.reason}"
             publish_text = review.publish_text
             if not publish_text:
                 if review.strikes >= self.publish_review.BAN_THRESHOLD:
