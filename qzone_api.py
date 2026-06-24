@@ -27,6 +27,7 @@ class QzoneAPI(QzoneHttpClient):
     DOLIKE_URL = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
     LIST_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
     COMMENT_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
+    FORWARD_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_forward_v6"
     ZONE_LIST_URL = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more"
     VISITOR_URL = "https://h5.qzone.qq.com/proxy/domain/g.qzone.qq.com/cgi-bin/friendshow/cgi_get_visitor_more"
     REPLY_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
@@ -118,6 +119,52 @@ class QzoneAPI(QzoneHttpClient):
             self.EMOTION_URL,
             params={"g_tk": ctx.gtk2, "uin": ctx.uin},
             data=data,
+        )
+        return ApiResponse.from_raw(raw)
+
+    async def forward(self, post: Post, content: str = "") -> ApiResponse:
+        """原生转发指定说说到登录账号自己的 QQ 空间。
+
+        说明：该接口是从 QQ 空间网页端历史抓包资料反推而来，核心参数为：
+        - tid: 被转发说说的 tid
+        - t1_uin: 被转发说说作者 uin
+        - hostuin: 当前登录账号 uin（即 bot 空间）
+        - con: 转发时 bot 自己写在上方的正文
+        """
+        if not post.tid:
+            raise ValueError("被转发说说 tid 为空")
+        if not post.uin:
+            raise ValueError("被转发说说作者 uin 为空")
+        ctx = await self.session.get_ctx()
+        data: dict[str, Any] = {
+            "tid": str(post.tid),
+            "t1_source": "1",
+            "t1_uin": str(post.uin),
+            "signin": "0",
+            "con": content or "",
+            "with_cmt": "0",
+            "fwdToWeibo": "0",
+            "forward_source": "1",
+            "code_version": "1",
+            "format": "fs",
+            "out_charset": "UTF-8",
+            "hostuin": str(ctx.uin),
+            "qzreferrer": f"{self.BASE_URL}/{post.uin}",
+        }
+        params: dict[str, Any] = {"g_tk": ctx.gtk2, "uin": ctx.uin}
+        if ctx.qzonetoken:
+            params["qzonetoken"] = ctx.qzonetoken
+        headers = ctx.headers()
+        headers.update({
+            "referer": f"{self.BASE_URL}/{post.uin}",
+            "origin": self.BASE_URL,
+        })
+        raw = await self.request(
+            "POST",
+            self.FORWARD_URL,
+            params=params,
+            data=data,
+            headers=headers,
         )
         return ApiResponse.from_raw(raw)
 

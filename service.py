@@ -129,6 +129,54 @@ class PostService:
         await self.db.save(post)
         logger.info(f"评论 -> {post.name}")
 
+    @staticmethod
+    def _extract_tid_from_response(data: dict[str, Any]) -> str | None:
+        """尽量从 QQ 空间发布/转发响应中提取新说说 tid。"""
+        if not isinstance(data, dict):
+            return None
+        candidates = [
+            data.get("tid"),
+            data.get("t1_tid"),
+            data.get("feed_tid"),
+        ]
+        nested = data.get("data")
+        if isinstance(nested, dict):
+            candidates.extend([
+                nested.get("tid"),
+                nested.get("t1_tid"),
+                nested.get("feed_tid"),
+            ])
+        for item in candidates:
+            if item:
+                return str(item)
+        return None
+
+    async def forward_post(self, *, source_post: Post, content: str = "") -> Post:
+        """原生转发一条好友说说到 bot 自己空间。"""
+        if not source_post.tid:
+            raise ValueError("被转发说说 tid 为空")
+        if not source_post.uin:
+            raise ValueError("被转发说说作者 uin 为空")
+        resp = await self.qzone.forward(source_post, content)
+        if not resp.ok:
+            raise RuntimeError(f"转发说说失败：{resp.message or resp.raw}")
+        uin = await self.session.get_uin()
+        name = await self.session.get_nickname()
+        forwarded = Post(
+            uin=uin,
+            name=name,
+            text=content or "",
+            images=[],
+            videos=[],
+            rt_con=source_post.text or source_post.rt_con or "",
+            status="approved",
+        )
+        forwarded.tid = self._extract_tid_from_response(resp.data)
+        now = resp.data.get("now") if isinstance(resp.data, dict) else None
+        forwarded.create_time = int(now or time.time())
+        await self.db.save(forwarded)
+        return forwarded
+
     async def withdraw_post(self, tid: str) -> None:
         """
         撤回（删除）一条自己空间的说说。

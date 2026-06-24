@@ -191,6 +191,10 @@ class QzonePlugin(Star):
         self._prob_daily_count: int = 0
         self._prob_min_interval_sec: int = 30 * 60
         self._prob_daily_limit: int = 5
+        # 好友列表短缓存：投稿/转发前用于确认“投稿人是 bot 好友”。
+        self._friend_ids_cache: set[str] = set()
+        self._friend_ids_cache_ts: float = 0.0
+        self._friend_ids_cache_ttl: int = 5 * 60
 
     async def initialize(self):
         """插件加载时触发"""
@@ -727,10 +731,169 @@ class QzonePlugin(Star):
                 continue
         await event.send(event.plain_result("遍历好友后未找到可互动的新说说，可能都已评论过"))
 
+    async def _get_client_from_platforms(self):
+        """按 HappyBirthday 插件的方式兜底获取 aiocqhttp client。"""
+        if self.cfg.client:
+            return self.cfg.client
+        try:
+            platforms = self.context.platform_manager.get_insts()
+            for platform in platforms:
+                if hasattr(platform, "get_client"):
+                    client = platform.get_client()
+                    if client:
+                        self.cfg.client = client
+                        return client
+        except Exception as e:
+            logger.debug(f"从平台实例获取 client 失败：{e}")
+        return None
+
+    async def _ensure_client(self, event: AiocqhttpMessageEvent):
+        if not self.cfg.client:
+            self.cfg.client = event.bot
+        return self.cfg.client or await self._get_client_from_platforms()
+
+    async def _is_bot_friend(self, user_id: str, *, force_refresh: bool = False) -> bool:
+        """判断 user_id 是否是 bot 好友；无法确认时保守返回 False。"""
+        client = await self._get_client_from_platforms()
+        if not client:
+            logger.warning("无法校验好友关系：缺少 CQHttp client")
+            return False
+        now = time.time()
+        if force_refresh or not self._friend_ids_cache or now - self._friend_ids_cache_ts > self._friend_ids_cache_ttl:
+            try:
+                friend_list = await client.get_friend_list()
+                self._friend_ids_cache = {str(f.get("user_id")) for f in friend_list if f.get("user_id") is not None}
+                self._friend_ids_cache_ts = now
+            except Exception as e:
+                logger.error(f"获取好友列表失败，拒绝本次投稿以保证安全：{e}")
+                return False
+        return str(user_id) in self._friend_ids_cache
+
+    def _build_forward_review_text(self, source_post: Post) -> str:
+        """构造审核文本：审核原帖内容，而不是只审核转发时的来源标注。"""
+        parts: list[str] = []
+        if (source_post.text or "").strip():
+            parts.append((source_post.text or "").strip())
+        if (source_post.rt_con or "").strip():
+            parts.append(f"[原帖本身包含转发内容]\n{(source_post.rt_con or '').strip()}")
+        if source_post.videos:
+            parts.append(f"[视频说说，共{len(source_post.videos)}个视频]")
+        return "\n\n".join(parts).strip()
+
+    async def _load_latest_user_space_post(self, user_id: str) -> Post:
+        """读取用户自己空间最新一条说说；优先读详情，失败则降级列表结果。"""
+        try:
+            posts = await self.service.query_feeds(
+                target_id=str(user_id),
+                pos=0,
+                num=1,
+                with_detail=True,
+            )
+        except Exception as detail_err:
+            logger.debug(f"读取用户空间说说详情失败，降级使用列表结果 user_id={user_id}: {detail_err}")
+            posts = await self.service.query_feeds(
+                target_id=str(user_id),
+                pos=0,
+                num=1,
+                with_detail=False,
+            )
+        if not posts:
+            raise RuntimeError("没有读到你空间里的说说。请先在自己的 QQ 空间发一条说说，再对我说“我要投稿”。")
+        source_post = posts[0]
+        if not (source_post.text or "").strip() and not source_post.images and not source_post.videos and not (source_post.rt_con or "").strip():
+            raise RuntimeError("你空间最新一条说说没有可投稿的文字、图片、视频或转发内容，请先发一条新的说说后再投稿。")
+        return source_post
+
+    async def _submit_latest_own_qzone_post(self, event: AiocqhttpMessageEvent) -> tuple[str, Post | None]:
+        """投稿主流程：好友用户自己的最新空间说说 → 审核 → bot 原生转发。"""
+        sender_id = str(event.get_sender_id())
+        sender_name = event.get_sender_name() or sender_id
+        await self._ensure_client(event)
+
+        is_admin = sender_id in self.cfg.admins_id
+        if not bool(self.cfg.trigger.publish_everyone_enabled if self.cfg.trigger.publish_everyone_enabled is not None else True) and not is_admin:
+            return "当前只允许管理员投稿。", None
+
+        if not await self._is_bot_friend(sender_id):
+            return "只有 bot 好友才能投稿。请先加 bot 为好友，并确保你的 QQ 空间对 bot 可见。", None
+
+        daily_limit = int(self.cfg.trigger.publish_per_user_daily_limit or 1)
+        today_count = await self.db.count_interactions_since(
+            action="submit_forward", actor_uin=sender_id,
+            since_ts=self._today_start_ts(),
+        )
+        if daily_limit >= 0 and today_count >= daily_limit:
+            return f"你今天已经成功投稿 {today_count} 条啦，明天再来～", None
+
+        if self.publish_review is None:
+            return "投稿审核模块未初始化，请稍后再试。", None
+        if self.publish_review.is_banned(sender_id):
+            return "你的投稿权限已被限制，无法继续投稿。", None
+
+        source_post = await self._load_latest_user_space_post(sender_id)
+        source_tid = str(source_post.tid or "")
+        if source_tid and await self.db.has_interaction(action="submit_forward_source", tid=source_tid):
+            return "你空间这条最新说说已经投稿过啦；如果要再投稿，请先在自己的空间发一条新的说说。", None
+
+        review_text = self._build_forward_review_text(source_post)
+        review = await self.publish_review.submit(
+            user_id=sender_id,
+            nickname=source_post.name or sender_name,
+            text=review_text,
+            images=source_post.images or [],
+        )
+
+        if review.status == review.BANNED:
+            return "你的投稿权限已被限制，无法继续投稿。", None
+        if review.status == review.ERROR:
+            return f"审核服务暂时不可用，没有记你违规，请稍后再试。原因：{review.reason}", None
+        if review.status == review.VIOLATION:
+            remaining = self.publish_review.BAN_THRESHOLD - review.strikes
+            if remaining <= 0:
+                return "投稿内容涉及严重违规，已被禁止转发，且你的投稿权限已被永久限制。", None
+            return f"投稿内容涉及严重违规，已被禁止转发。这是你第 {review.strikes} 次违规，累计 {self.publish_review.BAN_THRESHOLD} 次将永久限制投稿权限。原因：{review.reason}", None
+        if review.status == review.REJECTED:
+            return f"投稿审核未通过，请修改你空间里的说说后重新投稿。原因：{review.reason}", None
+
+        # 原生转发时，bot 自己写在上方的正文只放来源标注；原帖内容由 QQ 空间转发卡片承载。
+        forward_text = PublishReview.build_attribution_text(sender_id, source_post.name or sender_name, "")
+        forwarded = await self.service.forward_post(source_post=source_post, content=forward_text)
+        await self.db.log_interaction(
+            action="submit_forward", source="submit_latest_own_qzone",
+            tid=forwarded.tid, target_uin=forwarded.uin,
+            group_id=event.get_group_id(), actor_uin=sender_id,
+            extra=f"source_tid={source_tid};source_uin={source_post.uin}",
+        )
+        if source_tid:
+            await self.db.log_interaction(
+                action="submit_forward_source", source="submit_latest_own_qzone",
+                tid=source_tid, target_uin=source_post.uin,
+                group_id=event.get_group_id(), actor_uin=sender_id,
+                extra=f"forwarded_tid={forwarded.tid or ''}",
+            )
+        return "投稿审核通过，已转发到 bot 空间", forwarded
+
+    @filter.command("qq空间_投稿", alias={"我要投稿", "投稿"})
+    async def submit_latest_feed(self, event: AiocqhttpMessageEvent):
+        """用户先在自己空间发说说，再让 bot 原生转发实现投稿。"""
+        try:
+            msg, forwarded = await self._submit_latest_own_qzone_post(event)
+            if forwarded:
+                await self.sender.send_post(event, forwarded, message=msg)
+                event.stop_event()
+            else:
+                yield event.plain_result(msg)
+        except Exception as e:
+            logger.error(f"投稿转发失败：{e}")
+            yield event.plain_result(f"投稿失败：{e}")
+
     @filter.command("qq空间_发说说")
     async def publish_feed(self, event: AiocqhttpMessageEvent):
         sender_id = event.get_sender_id()
         is_admin = str(sender_id) in self.cfg.admins_id
+        if not is_admin:
+            yield event.plain_result("现在投稿统一改为转发你自己空间里的最新说说：请先在自己的 QQ 空间写一篇说说，然后对我说“我要投稿”。")
+            return
         if not bool(self.cfg.trigger.publish_everyone_enabled if self.cfg.trigger.publish_everyone_enabled is not None else True) and not is_admin:
             yield event.plain_result("当前只允许管理员发说说。")
             return
@@ -1096,126 +1259,50 @@ class QzonePlugin(Star):
     # ---- LLM 工具 ----
 
     @filter.llm_tool()
-    async def llm_publish_feed(self, event: AiocqhttpMessageEvent, text: str = "", get_image: bool = True):
-        """发布/投稿一条 QQ 空间说说（支持多图，最多 9 张）。
+    async def llm_submit_latest_qzone_post(self, event: AiocqhttpMessageEvent):
+        """转发当前用户自己 QQ 空间最新说说，实现投稿。
 
-        【核心逻辑】当用户明确要求"发说说""投稿""发布到QQ空间""帮我发一条动态/空间"等，并且给出了要发布的内容时，应该调用本工具；不要改用只读访问空间工具。
-        普通用户投稿会自动经过 LLM 内容审核、冷却、每日次数限制和黑名单检查；管理员会直接发布。
-        如果用户只是在询问能否发布，应先询问正文；如果用户已经给出正文，例如"内容是 hello world"，应把正文作为 text 调用。
-        如果用户想在说说里 @某个好友：可以在 text 里直接写 @对方的QQ号（如"@123456 生日快乐"），或者保留用户消息里 @到的人的昵称；插件会自动把它转换成 QQ 空间里蓝色可点击、会提醒对方的 @好友。你不需要自己拼任何特殊格式。
+        当用户表达“我要投稿”“投稿说说”“帮我转发我刚发的空间”“我想投稿到 bot 空间”等意图时，调用本工具。
 
-        【图片确认关键规则】：
-        - 本工具只能从 **当前这条消息** 或 **被回复的那条消息** 中提取图片。
-        - 在调用本工具之前，你必须确认用户要投稿的说说是否带图：
-          1. 如果用户提到了图片、发了图、或者说"有图"/"配图"/"附图"等 → 必须再确认一次："请问你要投稿的内容带图吗？如果带图，请**引用/回复**包含图片的那条消息，或者把图片和文字放在同一条消息里发给我。"
-          2. 确认后，如果用户确实带图了 → 你需要判断带了几张图（1-9张），并在调用工具时把 get_image 设为 true。
-          3. 如果用户确认不带图 → 你可以把 get_image 设为 false，但依然正常调用本工具发布纯文字说说。
-        - 如果用户在上一条消息发了图，然后在这条消息说"投稿xxx"，**不会** 自动带上上一条消息的图（除非用户把这条消息作为回复发送）。
-        - 因此：当用户表达要投稿/发说说，但**当前消息链里没有图片、也没有回复包含图片的消息**时，你必须主动提示用户：
-          "请**引用/回复**包含图片的那条消息，或者把图片和文字放在同一条消息里发给我。"
-        - 支持多图投稿（最多 9 张），会按消息里的顺序上传。
-
-        Args:
-            text(string): 要发布到 QQ 空间的说说正文。必须尽量提取用户真正想发布的内容，不要包含"帮我投稿/内容是"等指令外壳。例如用户说"帮我投稿一篇说说，内容是hello world"，text 应为"hello world"。如需 @好友，直接在正文相应位置写 @QQ号 即可。
-            get_image(boolean): 是否尝试从当前消息或回复中提取图片并随说说一起发布。默认 true；纯文字投稿也可以保持 true。若当前消息无图且无回复图片，将发布纯文字说说。
+        重要规则：
+        - 不要向用户索要投稿正文，也不要把用户在聊天里发来的文字直接发布到 bot 空间。
+        - 如果用户还没有在自己的 QQ 空间写说说，请直接告诉用户：
+          “请先去你自己的 QQ 空间写一篇说说，然后再对我说‘我要投稿’，我会读取你空间最新一条说说并帮你转发投稿。”
+        - 本工具会检查用户是否是 bot 好友；不是好友则拒绝。
+        - 本工具会读取用户自己空间最新一条说说，按投稿审核三态逻辑审核，通过后由 bot 原生转发到 bot 空间。
+        - bot 转发时，上方正文只写“【来自 @xxx 的投稿】”，原帖内容由 QQ 空间转发卡片显示。
         """
-        sender_id = event.get_sender_id()
-        is_admin = str(sender_id) in self.cfg.admins_id
-        if not bool(self.cfg.trigger.publish_everyone_enabled if self.cfg.trigger.publish_everyone_enabled is not None else True) and not is_admin:
-            return "当前只允许管理员发说说。"
-        daily_limit = int(self.cfg.trigger.publish_per_user_daily_limit or 1)
-        today_count = await self.db.count_interactions_since(
-            action="publish", actor_uin=sender_id, since_ts=self._today_start_ts(),
+        try:
+            msg, forwarded = await self._submit_latest_own_qzone_post(event)
+            if forwarded:
+                await self.sender.send_post(event, forwarded, message=msg)
+                return "已读取用户自己空间最新说说，审核通过，并转发到 bot 空间。"
+            return msg
+        except Exception as e:
+            logger.error(f"LLM投稿转发失败：{e}")
+            return f"投稿失败：{e}"
+
+    @filter.llm_tool()
+    async def llm_publish_feed(self, event: AiocqhttpMessageEvent, text: str = "", get_image: bool = True):
+        """已弃用：不要再用聊天正文直接让 bot 发说说/投稿。
+
+        如果用户想“投稿说说/发到 bot 空间/帮我发一条动态”，请告诉用户：
+        “请先去你自己的 QQ 空间写一篇说说，然后再对我说‘我要投稿’，我会使用投稿转发工具读取你空间最新一条说说，审核后由 bot 原生转发。”
+
+        然后应调用 llm_submit_latest_qzone_post，而不是本工具。
+        """
+        return (
+            "现在投稿统一改为转发用户自己空间里的最新说说。"
+            "请先去你自己的 QQ 空间写一篇说说，然后对我说‘我要投稿’，"
+            "我会读取你空间最新一条说说，审核后由 bot 原生转发到 bot 空间。"
         )
-        if daily_limit >= 0 and today_count >= daily_limit and not is_admin:
-            return f"你今天已经让 bot 发过 {today_count} 条说说啦，明天再来。"
-
-        allow_images = bool(self.cfg.trigger.publish_with_image if self.cfg.trigger.publish_with_image is not None else True)
-        images = await get_image_urls(event) if (get_image and allow_images) else []
-        publish_text = (text or "").strip()
-        sender_name = event.get_sender_name() or sender_id
-
-        # 🛡️ 空文本兜底：LLM 有时不传 text 参数，尝试从消息链提取
-        if not publish_text:
-            for msg in reversed(event.get_messages()):
-                if isinstance(msg, Plain) and msg.text.strip():
-                    candidate = msg.text.strip()
-                    # 过滤纯命令词
-                    cmd_words = {"发说说", "投稿", "帮我发", "帮我发说说", "发一条", "发个说说"}
-                    if candidate.lower() not in cmd_words and len(candidate) > 2:
-                        publish_text = candidate
-                        break
-            if not publish_text:
-                return "发布内容为空。请告诉我你想发什么内容，比如：'帮我发说说 今天天气真好'"
-
-        # 把正文里的 @某人 / @QQ号 转成 QQ空间可点击、会提醒对方的 @好友格式。
-        # at_map 取自触发本次发说说的那条消息里的原生 At 段（含 LLM 把 @昵称写进 text 的情况）。
-        try:
-            at_map = await build_at_map(event)
-            publish_text = await convert_ats_to_qzone(event, publish_text, at_map=at_map)
-        except Exception as e:
-            logger.warning(f"转换 @好友格式失败（按原文发布）：{e}")
-
-        if not is_admin:
-            if self.publish_review.is_banned(str(sender_id)):
-                return "你的投稿权限已被限制，无法继续投稿。"
-            review = await self.publish_review.submit(
-                user_id=str(sender_id), nickname=sender_name,
-                text=publish_text, images=images,
-            )
-            if review.status == review.BANNED:
-                return "你的投稿权限已被限制，无法继续投稿。"
-            # 审核流程本身没跑成功（大模型超时/异常/不可用）→ 不算违规，提示稍后重试。
-            if review.status == review.ERROR:
-                return f"审核服务暂时不可用，没有记你违规，请稍后再试。原因：{review.reason}"
-            # 严重违规：记违规 +1，提示用户
-            if review.status == review.VIOLATION:
-                remaining = self.publish_review.BAN_THRESHOLD - review.strikes
-                if remaining <= 0:
-                    return "投稿内容涉及严重违规，已被禁止发布，且你的投稿权限已被永久限制。"
-                return f"投稿内容涉及严重违规，已被禁止发布。这是你第 {review.strikes} 次违规，累计 {self.publish_review.BAN_THRESHOLD} 次将永久限制投稿权限。原因：{review.reason}"
-            # 普通驳回：不发布，不记违规
-            if review.status == review.REJECTED:
-                return f"投稿审核未通过，请修改后重新投稿。原因：{review.reason}"
-            publish_text = review.publish_text
-            if not publish_text:
-                if review.strikes >= self.publish_review.BAN_THRESHOLD:
-                    return "投稿未通过审核，且你已累计多次违规，以后将无法投稿。"
-                return "投稿未通过审核，请修改后重新投稿。"
-            try:
-                post = await self.service.publish_post(text=publish_text, images=images or [])
-                await self.db.log_interaction(
-                    action="publish", source="llm_publish_approved",
-                    tid=post.tid, target_uin=post.uin,
-                    group_id=event.get_group_id(), actor_uin=sender_id,
-                )
-                await self.sender.send_post(event, post, message="投稿审核通过，已发布")
-                return "已发布说说到QQ空间。"
-            except Exception as e:
-                logger.error(f"LLM发说说失败：{e}")
-                return f"发布失败：{e}"
-
-        if bool(self.cfg.trigger.publish_with_attribution if self.cfg.trigger.publish_with_attribution is not None else True):
-            publish_text = PublishReview.build_attribution_text(str(sender_id), sender_name, publish_text)
-        try:
-            post = await self.service.publish_post(text=publish_text, images=images)
-            await self.db.log_interaction(
-                action="publish", source="llm_publish",
-                tid=post.tid, target_uin=post.uin,
-                group_id=event.get_group_id(), actor_uin=sender_id,
-            )
-            await self.sender.send_post(event, post, message="已发布")
-            return "已发布说说到QQ空间。"
-        except Exception as e:
-            logger.error(f"LLM发说说失败：{e}")
-            return f"发布失败：{e}"
 
     @filter.llm_tool()
     async def llm_visit_friend_qzone(self, event: AiocqhttpMessageEvent, user_id: str | None = None):
         """只读访问某个用户的 QQ 空间最新说说。
 
         仅当用户要求“看看/访问/读取/查看某人的空间或最新说说”时使用本工具。本工具不会发布新说说、不会评论、不会点赞。
-        如果用户要求“发说说/投稿/发布动态”，不要调用本工具，应调用 llm_publish_feed。
+        如果用户要求“投稿说说/发布到 bot 空间/帮我发一条动态”，不要调用本工具，应先提示用户去自己的 QQ 空间写说说，然后调用 llm_submit_latest_qzone_post。
 
         Args:
             user_id(string): 要访问的 QQ 号。留空时默认访问当前发消息用户的空间；如果用户 @ 了别人或明确给出 QQ 号，应传入对应 QQ 号。
