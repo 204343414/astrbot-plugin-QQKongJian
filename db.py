@@ -367,8 +367,8 @@ class PostDB:
         """
         列出某个用户成功发布过的投稿（按时间倒序，最新在前）。
 
-        数据来源是 interaction_log 里 action='publish' 的记录（actor_uin 即投稿人），
-        再 LEFT JOIN posts 拿到正文/图片做预览。
+        数据来源是 interaction_log 里 action IN ('publish', 'submit_forward') 的记录（actor_uin 即投稿人），
+        再 LEFT JOIN posts 拿到正文/转发内容/图片做预览。
 
         include_withdrawn=False 时，会排除掉该用户已经撤回过的 tid
         （即存在 action='withdraw' 且同 tid、同 actor 的记录）。
@@ -382,10 +382,11 @@ class PostDB:
                 SELECT il.tid,
                        MAX(il.created_at) AS pub_time,
                        p.text,
-                       p.images
+                       p.images,
+                       p.rt_con
                 FROM interaction_log il
                 LEFT JOIN posts p ON p.tid = il.tid
-                WHERE il.action = 'publish'
+                WHERE il.action IN ('publish', 'submit_forward')
                   AND il.actor_uin = ?
                   AND il.tid IS NOT NULL
                 GROUP BY il.tid
@@ -415,13 +416,16 @@ class PostDB:
             if is_withdrawn and not include_withdrawn:
                 continue
             text = row[2] or ""
+            rt_con = row[4] or ""
+            # 原生转发投稿的 p.text 通常只是“【来自 @xxx 的投稿】”，列表预览优先展示原帖内容。
+            preview_text = rt_con or text
             try:
                 images = json.loads(row[3]) if row[3] else []
             except Exception:
                 images = []
             result.append({
                 "tid": tid,
-                "text": text,
+                "text": preview_text,
                 "image_count": len(images) if isinstance(images, list) else 0,
                 "created_at": int(row[1] or 0),
                 "withdrawn": is_withdrawn,
@@ -438,7 +442,7 @@ class PostDB:
             async with db.execute(
                 """
                 SELECT 1 FROM interaction_log
-                WHERE action = 'publish' AND actor_uin = ? AND tid = ?
+                WHERE action IN ('publish', 'submit_forward') AND actor_uin = ? AND tid = ?
                 LIMIT 1
                 """,
                 (str(actor_uin), str(tid)),

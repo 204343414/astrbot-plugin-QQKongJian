@@ -53,6 +53,8 @@ import random
 import re
 import shutil
 import time
+
+import aiosqlite
 from datetime import datetime
 from typing import Any
 
@@ -1171,6 +1173,55 @@ class QzonePlugin(Star):
             return "（无文字内容）"
         return t if len(t) <= limit else t[:limit] + "…"
 
+    async def _repair_missing_submit_forward_records(self, actor_uin: str) -> None:
+        """修复早期转发成功但未拿到新 tid 的投稿记录。
+
+        第一版原生转发接口在部分返回里拿不到新 tid，导致 action='submit_forward'
+        记录的 tid 为空，进而“我的投稿/撤回投稿”列表看不到刚转发的说说。
+        这里仅在发现空 tid 记录时，保守回查 bot 自己空间最新几条说说，把时间接近且
+        正文包含“投稿”的最新说说补记为该用户的 submit_forward 记录。
+        """
+        actor = str(actor_uin)
+        try:
+            async with aiosqlite.connect(self.db.db_path) as db:
+                async with db.execute(
+                    """
+                    SELECT created_at, extra FROM interaction_log
+                    WHERE action = 'submit_forward'
+                      AND actor_uin = ?
+                      AND tid IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (actor,),
+                ) as cur:
+                    row = await cur.fetchone()
+            if not row:
+                return
+            missing_ts = int(row[0] or 0)
+            bot_uin = str(await self.session.get_uin())
+            posts = await self.service.query_feeds(target_id=bot_uin, pos=0, num=5, with_detail=False)
+            for post in posts:
+                if not post.tid:
+                    continue
+                if await self.db.is_published_by_actor(actor, str(post.tid)):
+                    continue
+                text = post.text or ""
+                if "投稿" not in text:
+                    continue
+                if missing_ts and post.create_time and abs(int(post.create_time) - missing_ts) > 30 * 60:
+                    continue
+                await self.db.log_interaction(
+                    action="submit_forward", source="repair_missing_forward_tid",
+                    tid=post.tid, target_uin=post.uin,
+                    actor_uin=actor,
+                    extra=f"repaired_from_empty_tid_ts={missing_ts}",
+                )
+                logger.info(f"已修复投稿转发记录：actor={actor}, tid={post.tid}")
+                return
+        except Exception as e:
+            logger.debug(f"修复投稿转发空 tid 记录失败（不影响主流程）：{e}")
+
     def _render_publish_list(self, records: list[dict]) -> str:
         """把投稿列表渲染成带序号的文本，供用户选择撤回哪条。"""
         lines = []
@@ -1186,6 +1237,7 @@ class QzonePlugin(Star):
     async def my_publishes(self, event: AiocqhttpMessageEvent):
         """查看自己最近发布成功的投稿（含 tid，便于撤回）。"""
         sender_id = str(event.get_sender_id())
+        await self._repair_missing_submit_forward_records(sender_id)
         records = await self.db.list_published_by_actor(sender_id, limit=10)
         if not records:
             yield event.plain_result("你还没有成功发布过投稿哦～")
@@ -1210,6 +1262,7 @@ class QzonePlugin(Star):
         arg = (arg or "").strip()
 
         # 取该用户的投稿列表（用于序号选择和鉴权展示）
+        await self._repair_missing_submit_forward_records(sender_id)
         records = await self.db.list_published_by_actor(sender_id, limit=10)
 
         # 无参数：展示列表引导
@@ -1351,6 +1404,7 @@ class QzonePlugin(Star):
         本工具是只读的，不会删除任何内容。
         """
         sender_id = str(event.get_sender_id())
+        await self._repair_missing_submit_forward_records(sender_id)
         records = await self.db.list_published_by_actor(sender_id, limit=10)
         if not records:
             return "该用户最近没有通过本 bot 成功发布过投稿，没有可撤回的内容。"
@@ -1386,6 +1440,7 @@ class QzonePlugin(Star):
 
         if not tid:
             # 没给 tid：尝试帮用户列出投稿引导确认
+            await self._repair_missing_submit_forward_records(sender_id)
             records = await self.db.list_published_by_actor(sender_id, limit=10)
             if not records:
                 return "没有提供要撤回的说说 tid，且该用户也没有可撤回的投稿记录。"

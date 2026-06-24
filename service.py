@@ -174,6 +174,25 @@ class PostService:
         forwarded.tid = self._extract_tid_from_response(resp.data)
         now = resp.data.get("now") if isinstance(resp.data, dict) else None
         forwarded.create_time = int(now or time.time())
+
+        # emotion_cgi_forward_v6 不同返回格式不一定直接带新 tid。
+        # 转发成功后若拿不到 tid，立即读取 bot 自己空间最新一条说说来回填，
+        # 否则后续“我的投稿/撤回投稿”无法命中这条新转发。
+        if not forwarded.tid:
+            try:
+                resp_latest = await self.qzone.get_feeds(str(uin), pos=0, num=1)
+                if resp_latest.ok:
+                    msglist = resp_latest.data.get("msglist") or []
+                    latest_posts = QzoneParser.parse_feeds(msglist)
+                    if latest_posts:
+                        latest = latest_posts[0]
+                        if latest.tid:
+                            latest.status = "approved"
+                            await self.db.save(latest)
+                            return latest
+            except Exception as e:
+                logger.warning(f"转发成功但回查最新说说 tid 失败：{e}")
+
         await self.db.save(forwarded)
         return forwarded
 
