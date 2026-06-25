@@ -1324,6 +1324,7 @@ class QzonePlugin(Star):
         - 本工具会检查用户是否是 bot 好友；不是好友则拒绝。
         - 本工具会读取用户自己空间最新一条说说，按投稿审核三态逻辑审核，通过后由 bot 原生转发到 bot 空间。
         - bot 转发时，上方正文只写“【来自 @xxx 的投稿】”，原帖内容由 QQ 空间转发卡片显示。
+        - 使用该工具前需要确认并告知用户投稿是直接帮忙转发最新的一条说说，防止用户误投稿他不想要的内容。
         """
         try:
             msg, forwarded = await self._submit_latest_own_qzone_post(event)
