@@ -281,6 +281,7 @@ class LLMAction:
             or self.context.get_using_provider()
         )
         has_images = bool(post.images)
+        has_videos = bool(post.videos)
         if not isinstance(provider, Provider):
             if has_images:
                 return False, "LLM不可用，含图说说默认不搬"
@@ -308,7 +309,9 @@ class LLMAction:
             f"{image_rule}\n\n"
             f"说说作者：{post.name}({post.uin})\n"
             f"说说文字：{content or '（无文字）'}\n"
-            f"图片数量：{len(post.images)}\n\n"
+            f"图片数量：{len(post.images)}\n"
+            f"视频数量：{len(post.videos)}\n"
+            "（注意：如果含有视频内容，请结合提示词判断是否适合搬运；视频内容无法直接审核，需特别谨慎。）\n\n"
             "请只回答：\n通过\n或\n不通过|简短原因"
         )
         try:
@@ -320,10 +323,16 @@ class LLMAction:
             result = self.strip_thinking(resp.completion_text).strip()
             compact_result = re.sub(r"[\s ]+", "", result)
             if compact_result.startswith("通过") and not compact_result.startswith("不通过"):
-                return True, "LLM审核通过"
+                msg = "LLM审核通过"
+                if has_videos:
+                    msg += "（检测到视频内容，无法直接审核视频安全性，已由提示词判断是否适合搬运）"
+                return True, msg
             if compact_result.startswith("不通过"):
                 parts = result.split("|", 1)
-                return False, parts[1].strip() if len(parts) > 1 else "LLM审核不通过"
+                reason = parts[1].strip() if len(parts) > 1 else "LLM审核不通过"
+                if has_videos:
+                    reason += "（检测到视频内容，无法直接审核视频安全性，提示词已处理拒绝逻辑）"
+                return False, reason
             if "不通过" in compact_result or "拒绝" in compact_result or "违规" in compact_result:
                 return False, "LLM审核不通过"
             logger.warning(f"搬运安全审核返回不可解析：{result!r}，按不通过处理")
