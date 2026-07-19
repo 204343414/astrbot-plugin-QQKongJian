@@ -202,6 +202,9 @@ class Post(pydantic.BaseModel):
             name = "匿名者" if self.anon else f"{self.name}({self.uin})"
             lines.append(f"\n\n备注：稿件#{self.id}待审核, 投稿来自{name}")
 
+        # 卡片底部提示：如不希望 bot 搬说说可 @bot 关闭
+        lines.append("\n\n---\n如不希望 bot 搬说说，可 @bot 说「关闭」或联系管理员。")
+
         return "\n".join(lines)
 
     def update(self, **kwargs):

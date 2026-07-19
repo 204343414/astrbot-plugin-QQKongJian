@@ -150,19 +150,22 @@ class LLMAction:
         if LLMAction.is_critical_risk_content(raw_text):
             return LLMAction.critical_fallback_comment()
         candidates = [
-            "这张有点东西", "可以，这波挺有感觉", "这下真被你玩明白了", "有点意思", "这波我看懂了",
-            "确实挺会", "行，这条挺抓人", "这条可以", "懂了，味儿对了",
+            "今天状态不错呀", "这条看着挺开心的", "有被温柔到", "生活气息满满",
+            "看着心情也跟着好了", "这样的日常挺好的", "味道对了", "挺有生活感的",
         ]
         if post.images:
-            candidates = ["这图有点东西", "这张挺有感觉", "这张可以", "懂了，这图会说话", "这画面挺抓人"]
+            candidates = [
+                "画面里有种安静的好看", "这光线挺舒服的", "看着像一个好天气",
+                "这样的瞬间值得留一张", "颜色搭配得挺舒服", "图里有种温柔的味道",
+            ]
         return random.choice(candidates)
 
     @staticmethod
     def is_generic_image_comment(comment: str) -> bool:
         compact = re.sub(r"[\s ]+", "", comment or "")
         generic_patterns = [
-            "看着很不错", "蛮有意思", "挺有意思", "有点意思", "挺不错", "还不错",
-            "这张可以", "这图可以", "很有感觉", "挺有感觉", "挺好看的", "不错不错",
+            "看着很不错", "蛮有意思", "挺不错", "还不错", "不错不错",
+            "很有感觉", "挺有感觉", "挺好看的",
         ]
         return any(p in compact for p in generic_patterns)
 

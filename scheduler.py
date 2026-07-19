@@ -135,6 +135,7 @@ class AutoComment(AutoRandomCronTask):
                     source_prefix="auto",
                 )
                 if daily_limit >= 0 and today_count >= daily_limit:
+                    # 达到每日评论上限，不再评论，也不再自动点赞（统一由配置或命令控制互动方式）
                     continue
                 last_ts = await self.service.db.last_interaction_ts(
                     action="space_comment",
@@ -156,13 +157,22 @@ class AutoComment(AutoRandomCronTask):
                     tid=post.tid,
                     target_uin=post.uin,
                 )
+                liked_in_auto = False
                 if self.cfg.trigger.like_when_comment:
                     try:
                         if await self.service.llm.should_like(post):
                             await self.service.like_posts(post)
+                            liked_in_auto = True
                     except Exception as e:
                         logger.error(f"[AutoComment] 点赞判断失败：{e}")
-                await self.sender.send_admin_post(post, message="定时读说说：已评论")
+                await self.sender.send_admin_post(
+                    post,
+                    message=(
+                        "定时读说说：翻到了群友的有趣说说，已评论并点赞"
+                        if liked_in_auto else
+                        "定时读说说：翻到了群友的有趣说说，已留评论"
+                    ),
+                )
                 commented += 1
             except Exception as e:
                 err_msg = str(e)

@@ -350,9 +350,11 @@ class QzonePlugin(Star):
         return daily_limit < 0 or today_count < daily_limit
 
     async def _auto_comment_if_allowed(self, post: Post, *, source: str) -> tuple[bool, bool]:
+        """返回 (已评论, 已点赞)"""
         commented = False
         liked = False
-        if await self._can_auto_comment(post):
+        can_comment = await self._can_auto_comment(post)
+        if can_comment:
             try:
                 await self.service.comment_posts(post)
                 commented = True
@@ -465,15 +467,16 @@ class QzonePlugin(Star):
             content_for_risk = "\n".join(x for x in [post.text, post.rt_con] if x)
             is_critical = LLMAction.is_critical_risk_content(content_for_risk)
             was_commented = await self.db.has_interaction(action="space_comment", tid=post.tid)
-            commented, liked = await self._auto_comment_if_allowed(post, source=source)
+            commented, liked, _ = await self._auto_comment_if_allowed(post, source=source)
             if is_critical:
                 msg = "看到这条有点心疼，大家温柔一点"
             elif commented:
-                msg = "触发读说说：已评论并点赞" if liked else "触发读说说：已评论"
+                msg = "翻到了群友的有趣说说，评论并点赞" if liked else "翻到了群友的有趣说说，留了句评论"
             elif was_commented:
-                msg = "触发读说说：已评论并点赞" if self.cfg.trigger.like_when_comment else "触发读说说：已评论"
+                msg = "翻到了群友的有趣说说，之前已互动过" if self.cfg.trigger.like_when_comment else "翻到了群友的有趣说说，之前已评论"
             else:
-                msg = "触发读说说：搬来给大家看看"
+                msg = "翻到了群友的有趣说说，搬来给大家看看"
+            msg += "\n\n（如不希望 bot 搬说说，可 @bot 说「关闭」或联系管理员）"
             await self.sender.send_post(event, post, message=msg, send_admin=False if force else self.cfg.trigger.send_admin)
             if not force:
                 await self.db.log_interaction(
@@ -654,13 +657,14 @@ class QzonePlugin(Star):
                         continue
 
                     await self.service.comment_posts(post)
-                    msg = "已评论"
+                    msg = "翻到了群友的有趣说说，留了句评论"
                     if self.cfg.trigger.like_when_comment:
                         if await self.llm.should_like(post):
                             await self.service.like_posts(post)
                             msg += "并点赞"
                         else:
-                            msg += "（LLM判断不宜点赞）"
+                            msg += "（LLM判断不宜点赞，温柔陪伴）"
+                    msg += "\n\n（如不希望 bot 搬说说，可 @bot 说「关闭」或联系管理员）"
                     await self.sender.send_post(event, post, message=msg)
                 except Exception as e:
                     await event.send(event.plain_result(str(e)))
@@ -716,15 +720,16 @@ class QzonePlugin(Star):
                     continue
 
                 await self.service.comment_posts(post)
-                msg = "已评论"
+                msg = "翻到了群友的有趣说说，留了句评论"
                 if self.cfg.trigger.like_when_comment:
                     if await self.llm.should_like(post):
                         await self.service.like_posts(post)
                         msg += "并点赞"
                     else:
-                        msg += "（LLM判断不宜点赞）"
+                        msg += "（LLM判断不宜点赞，温柔陪伴）"
                 if post.tid:
                     self._interacted_tids.add(post.tid)
+                msg += "\n\n（如不希望 bot 搬说说，可 @bot 说「关闭」或联系管理员）"
                 await self.sender.send_post(event, post, message=msg)
                 return
             except Exception as e:
@@ -1421,6 +1426,22 @@ class QzonePlugin(Star):
             "\n\n请用自然语言把上面的投稿告诉用户，让他确认要撤回哪一条（可以报序号或内容），"
             "确认后调用 llm_withdraw_feed 并传入对应的 tid。不要擅自替用户决定撤哪条。"
         )
+
+    @filter.llm_tool()
+    async def llm_stop_forward_for_user(self, event: AiocqhttpMessageEvent, user_id: str | None = None):
+        """把指定用户加入不搬名单（关闭搬运），让 bot 不再自动搬运该用户的说说。
+
+        当用户表达“不要搬我的说说”“关闭搬运”“不想被搬运”“不希望 bot 搬说说”等意图时，
+        应调用本工具把对应用户加入忽略列表。可以传入 user_id（QQ 号），留空时默认当前发消息用户。
+        """
+        target_id = user_id or str(event.get_sender_id())
+        target_id = str(target_id).strip()
+        if not target_id.isdigit():
+            return "提供的用户 ID 无效，无法加入不搬名单。"
+        if self.cfg.source.is_ignore_user(target_id):
+            return f"用户 {target_id} 已在不搬名单中，无需重复添加。"
+        self.cfg.append_ignore_users(target_id)
+        return f"已把用户 {target_id} 加入不搬名单，bot 将不再自动搬运其说说。如需恢复，可联系管理员。"
 
     @filter.llm_tool()
     async def llm_withdraw_feed(self, event: AiocqhttpMessageEvent, tid: str = ""):
