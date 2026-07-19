@@ -467,7 +467,7 @@ class QzonePlugin(Star):
             content_for_risk = "\n".join(x for x in [post.text, post.rt_con] if x)
             is_critical = LLMAction.is_critical_risk_content(content_for_risk)
             was_commented = await self.db.has_interaction(action="space_comment", tid=post.tid)
-            commented, liked, _ = await self._auto_comment_if_allowed(post, source=source)
+            commented, liked = await self._auto_comment_if_allowed(post, source=source)
             if is_critical:
                 msg = "看到这条有点心疼，大家温柔一点"
             elif commented:
