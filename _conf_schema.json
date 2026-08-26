@@ -1,219 +1,225 @@
 {
-    "manage_group": {
-        "description": "管理群",
+  "manage_group": {
+    "description": "管理群",
+    "type": "string",
+    "hint": "可选。定时自动评论结果如果配置为通知管理员/管理群，会优先发送到此群；不填则私发管理员。"
+  },
+  "pillowmd_style_dir": {
+    "description": "Pillowmd样式目录路径",
+    "type": "string",
+    "hint": "留空则使用插件目录下的 default_style。若填写自定义样式目录，请使用绝对路径或相对插件目录的路径。pillowmd用于渲染说说内容。",
+    "default": ""
+  },
+  "llm": {
+    "description": "LLM模块配置",
+    "type": "object",
+    "hint": "",
+    "items": {
+      "comment_provider_id": {
+        "description": "评论说说用的LLM提供商",
+        "hint": "留空或者填写的提供商不存在时, 则使用当前正在使用的LLM提供商",
         "type": "string",
-        "hint": "可选。定时自动评论结果如果配置为通知管理员/管理群，会优先发送到此群；不填则私发管理员。"
-    },
-    "pillowmd_style_dir": {
-        "description": "Pillowmd样式目录路径",
-        "type": "string",
-        "hint": "留空则使用插件目录下的 default_style。若填写自定义样式目录，请使用绝对路径或相对插件目录的路径。pillowmd用于渲染说说内容。",
-        "default": ""
-    },
-    "llm": {
-        "description": "LLM模块配置",
-        "type": "object",
-        "hint": "",
-        "items": {
-            "comment_provider_id": {
-                "description": "评论说说用的LLM提供商",
-                "hint": "留空或者填写的提供商不存在时, 则使用当前正在使用的LLM提供商",
-                "type": "string",
-                "default": "",
-                "_special": "select_provider"
-            },
-            "comment_prompt": {
-                "description": "评论说说用的llm提示词",
-                "type": "text",
-                "hint": "强烈建议自行根据Bot人格进行改写, 从而达到更好的效果",
-                "default": "生成一句简短、直接、贴题、犀利的评论, 不要解释、不做自我描述、不分选项"
-            },
-            "publish_review_prompt": {
-                "description": "投稿审核用的LLM提示词",
-                "type": "text",
-                "hint": "用于 /qq空间_投稿：审核用户自己空间最新说说的原帖内容，然后由 bot 原生转发。可用变量：{content}=待审核完整内容（含图片数量提示），{text}=原始文字正文，{image_count}=图片数量，{attribution_name}=将发布的投稿来源显示名，{nickname}=原始用户昵称，{user_id}=投稿者QQ号。输出必须尽量约束为：通过 或 不通过|原因。",
-                "default": "你是一个QQ空间说说内容审核员。请判断以下投稿内容是否存在封号或违规风险。\n重点拦截：违法暴力、色情低俗、赌博毒品、诈骗钓鱼、恶意攻击、人肉网暴、广告引流、政治敏感等内容。\n投稿来源显示名也属于将被发布的内容；如果显示名含政治敏感、违法、色情、广告引流等风险，也必须不通过。\n普通日常、吐槽、游戏、学习、生活分享应通过；不要因为个别普通词过度拦截。\n\n投稿来源显示名：@{attribution_name}（原始昵称：{nickname}，用户ID：{user_id}）\n待审核内容：\n{content}\n\n请只回答以下两种格式之一：\n通过\n或\n不通过|具体原因（简短一句话）"
-            },
-            "publish_review_prompt_variables": {
-                "description": "投稿审核提示词可用变量说明",
-                "type": "string",
-                "hint": "只作为配置面板里的备忘说明；修改它不会影响审核逻辑。真正生效的是上面的“投稿审核用的LLM提示词”。用户名/投稿来源也会参与LLM审核。",
-                "default": "{content}=待审核完整内容（文字 + 图片数量提示）；{text}=原始文字正文；{image_count}=图片数量；{attribution_name}=将发布的投稿来源显示名；{nickname}=原始用户昵称；{user_id}=投稿者QQ号"
-            }
-        }
-    },
-    "source": {
-        "description": "数据来源配置",
-        "type": "object",
-        "hint": "",
-        "items": {
-            "ignore_groups": {
-                "description": "忽略的群聊列表",
-                "hint": "若群聊被忽略, Bot将不会从该群聊抽取聊天记录来写说说。建议将信息比较敏感的群聊加入此列表",
-                "type": "list",
-                "default": []
-            },
-            "ignore_users": {
-                "description": "忽略的用户列表",
-                "type": "list",
-                "hint": "Bot在探测某用户空间时，如果发现该用户未对Bot开放空间/无可见说说/账号不可访问，则自动把该QQ加入此列表，下次探测直接跳过，不浪费接口配额。当对方成为Bot好友时会自动从该列表移除(若仍不可见，下次探测会再次被加回)。你也可以手工添加/删除QQ号。",
-                "default": []
-            },
-            "post_max_msg": {
-                "description": "用于写说说的聊天记录的最大条数",
-                "type": "int",
-                "hint": "过长会爆上下文, 一般几百条足矣",
-                "slider": {
-                    "min": 100,
-                    "max": 1000,
-                    "step": 10
-                },
-                "default": 500
-            }
-        }
-    },
-    "trigger": {
-        "description": "触发配置",
-        "type": "object",
-        "hint": "",
-        "items": {
-            "comment_cron": {
-                "description": "自动评论的触发周期",
-                "type": "string",
-                "hint": "注意此处评论的是bot好友们最近发的说说！ Cron格式：分 时 日 月 周。例如：*/8 * * * * 表示每8分钟检查一次（配合每日3次上限，即每8分钟扫一次空间，评满3人后自动跳过）。留空表示禁用此功能",
-                "default": "*/8 * * * *"
-            },
-            "read_prob": {
-                "description": "聊天时触发评说说的概率",
-                "type": "float",
-                "hint": "群聊消息触发读说说的概率（翻到群友有趣说说的频率）；私聊不会自动触发。你当前常用 0.119 可继续使用。",
-                "slider": {
-                    "min": 0,
-                    "max": 1,
-                    "step": 0.0001
-                },
-                "default": 0.001
-            },
-            "send_admin": {
-                "description": "触发评说说时仅通知管理员",
-                "hint": "打开后, 渲染好的稿件将私发给bot管理员, 而不是直接发到群里",
-                "type": "bool",
-                "default": false
-            },
-            "like_when_comment": {
-                "description": "评说说时是否自动点赞",
-                "hint": "在评论完说说后会自动给此说说点赞",
-                "type": "bool",
-                "default": true
-            },
-            "auto_read_enabled": {
-                "description": "是否开启群聊概率读说说",
-                "type": "bool",
-                "hint": "只在群聊普通消息中按 read_prob 概率触发；私聊不会自动触发。",
-                "default": true
-            },
-            "auto_comment_per_user_daily_limit": {
-                "description": "每天最多自动评论同一个人几次",
-                "type": "int",
-                "hint": "仅限制自动评论（群聊概率触发/定时扫空间），手动 /qq空间_评说说 不受此限制。-1 表示不限制。",
-                "slider": {
-                    "min": -1,
-                    "max": 10,
-                    "step": 1
-                },
-                "default": 3
-            },
-            "auto_comment_per_user_cooldown_minutes": {
-                "description": "自动评论同一个人的最小间隔（分钟）",
-                "type": "int",
-                "hint": "默认 180 分钟，即 3 小时。仅限制自动评论。",
-                "slider": {
-                    "min": 0,
-                    "max": 1440,
-                    "step": 10
-                },
-                "default": 180
-            },
-            "group_show_per_user_daily_limit": {
-                "description": "同一个人在同一个群每天最多展示几张说说卡片",
-                "type": "int",
-                "hint": "同一条说说在同一个群只展示一次；不同群可以各展示一次。-1 表示不限制。",
-                "slider": {
-                    "min": -1,
-                    "max": 20,
-                    "step": 1
-                },
-                "default": 3
-            },
-            "publish_everyone_enabled": {
-                "description": "是否允许普通用户投稿",
-                "type": "bool",
-                "hint": "兼容旧配置字段。当前普通用户投稿统一为：先在自己空间发说说，再由 bot 审核并原生转发；/qq空间_发说说 仅保留给管理员直接发布。",
-                "default": true
-            },
-            "publish_per_user_daily_limit": {
-                "description": "普通用户每天最多成功投稿/转发几条说说",
-                "type": "int",
-                "hint": "仅成功转发后计数；审核失败、接口失败不消耗次数。-1 表示不限制。",
-                "slider": {
-                    "min": -1,
-                    "max": 10,
-                    "step": 1
-                },
-                "default": 1
-            },
-            "publish_with_attribution": {
-                "description": "转发投稿时是否自动标注来源用户",
-                "type": "bool",
-                "hint": "开启后 bot 原生转发时会在转发正文写“【来自 @投稿人 的投稿】”。",
-                "default": true
-            },
-            "publish_with_image": {
-                "description": "旧版直接投稿图片开关（兼容保留）",
-                "type": "bool",
-                "hint": "当前投稿改为原生转发用户自己空间最新说说，本字段主要为兼容旧配置保留。",
-                "default": true
-            },
-            "auto_probe_cooldown_minutes": {
-                "description": "同一用户自动探测空间的最小间隔（分钟）",
-                "type": "int",
-                "hint": "防止 read_prob 较高或群很多时，对同一个人的空间接口反复 F5。只影响群聊概率触发，不影响手动命令和测试触发。",
-                "slider": {
-                    "min": 0,
-                    "max": 120,
-                    "step": 1
-                },
-                "default": 5
-            },
-            "auto_approve_friend_request": {
-                "description": "是否自动同意好友申请",
-                "type": "bool",
-                "hint": "开启后, 当 bot 收到好友申请时会自动 set_friend_add_request(approve=True); 同意后, 如果对方之前在 ignore_users 里, 会自动移除(让下次探测重新判定)。如果你已经启用了其它自动同意好友的插件/配置, 可以关闭本项以避免冲突。",
-                "default": true
-            },
-            "ignore_user_cleanup_on_friend_change": {
-                "description": "成为好友时是否自动清理忽略列表",
-                "type": "bool",
-                "hint": "开启后, 任何时候发现 bot 与某人成为好友(无论是通过自动同意、好友事件还是定时扫描好友列表), 都会把对方QQ从 ignore_users 中移除。这样对方重新开放空间后能正常被探测到。",
-                "default": true
-            }
-        }
-    },
-    "cookies_str": {
-        "description": "QQ Cookies",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "comment_prompt": {
+        "description": "评论说说用的llm提示词",
         "type": "text",
-        "hint": "选填, 用于维持QQ空间登录态, 留空则自动从 aiocqhttp 客户端获取",
-        "default": ""
-    },
-    "timeout": {
-        "description": "请求超时时间",
-        "type": "int",
-        "hint": "网络请求的超时时间, 单位秒",
-        "slider": {
-            "min": 5,
-            "max": 60,
-            "step": 1
-        },
-        "default": 10
+        "hint": "强烈建议自行根据Bot人格进行改写, 从而达到更好的效果",
+        "default": "生成一句简短、直接、贴题、犀利的评论, 不要解释、不做自我描述、不分选项"
+      },
+      "publish_review_prompt": {
+        "description": "投稿审核用的LLM提示词",
+        "type": "text",
+        "hint": "用于 /qq空间_投稿：审核用户自己空间最新说说的原帖内容，然后由 bot 原生转发。可用变量：{content}=待审核完整内容（含图片数量提示），{text}=原始文字正文，{image_count}=图片数量，{attribution_name}=将发布的投稿来源显示名，{nickname}=原始用户昵称，{user_id}=投稿者QQ号。输出必须尽量约束为：通过 或 不通过|原因。",
+        "default": "你是一个QQ空间说说内容审核员。请判断以下投稿内容是否存在封号或违规风险。\n重点拦截：违法暴力、色情低俗、赌博毒品、诈骗钓鱼、恶意攻击、人肉网暴、广告引流、政治敏感等内容。\n投稿来源显示名也属于将被发布的内容；如果显示名含政治敏感、违法、色情、广告引流等风险，也必须不通过。\n普通日常、吐槽、游戏、学习、生活分享应通过；不要因为个别普通词过度拦截。\n\n投稿来源显示名：@{attribution_name}（原始昵称：{nickname}，用户ID：{user_id}）\n待审核内容：\n{content}\n\n请只回答以下两种格式之一：\n通过\n或\n不通过|具体原因（简短一句话）"
+      },
+      "publish_review_prompt_variables": {
+        "description": "投稿审核提示词可用变量说明",
+        "type": "string",
+        "hint": "只作为配置面板里的备忘说明；修改它不会影响审核逻辑。真正生效的是上面的“投稿审核用的LLM提示词”。用户名/投稿来源也会参与LLM审核。",
+        "default": "{content}=待审核完整内容（文字 + 图片数量提示）；{text}=原始文字正文；{image_count}=图片数量；{attribution_name}=将发布的投稿来源显示名；{nickname}=原始用户昵称；{user_id}=投稿者QQ号"
+      }
     }
+  },
+  "source": {
+    "description": "数据来源配置",
+    "type": "object",
+    "hint": "",
+    "items": {
+      "ignore_groups": {
+        "description": "忽略的群聊列表",
+        "hint": "若群聊被忽略, Bot将不会从该群聊抽取聊天记录来写说说。建议将信息比较敏感的群聊加入此列表",
+        "type": "list",
+        "default": []
+      },
+      "ignore_users": {
+        "description": "忽略的用户列表",
+        "type": "list",
+        "hint": "Bot在探测某用户空间时，如果发现该用户未对Bot开放空间/无可见说说/账号不可访问，则自动把该QQ加入此列表，下次探测直接跳过，不浪费接口配额。当对方成为Bot好友时会自动从该列表移除(若仍不可见，下次探测会再次被加回)。你也可以手工添加/删除QQ号。",
+        "default": []
+      },
+      "post_max_msg": {
+        "description": "用于写说说的聊天记录的最大条数",
+        "type": "int",
+        "hint": "过长会爆上下文, 一般几百条足矣",
+        "slider": {
+          "min": 100,
+          "max": 1000,
+          "step": 10
+        },
+        "default": 500
+      }
+    }
+  },
+  "trigger": {
+    "description": "触发配置",
+    "type": "object",
+    "hint": "",
+    "items": {
+      "comment_cron": {
+        "description": "自动评论的触发周期",
+        "type": "string",
+        "hint": "注意此处评论的是bot好友们最近发的说说！ Cron格式：分 时 日 月 周。例如：*/8 * * * * 表示每8分钟检查一次（配合每日3次上限，即每8分钟扫一次空间，评满3人后自动跳过）。留空表示禁用此功能",
+        "default": "*/8 * * * *"
+      },
+      "read_prob": {
+        "description": "聊天时触发评说说的概率",
+        "type": "float",
+        "hint": "群聊消息触发读说说的概率（翻到群友有趣说说的频率）；私聊不会自动触发。你当前常用 0.119 可继续使用。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.0001
+        },
+        "default": 0.001
+      },
+      "send_admin": {
+        "description": "触发评说说时仅通知管理员",
+        "hint": "打开后, 渲染好的稿件将私发给bot管理员, 而不是直接发到群里",
+        "type": "bool",
+        "default": false
+      },
+      "like_when_comment": {
+        "description": "评说说时是否自动点赞",
+        "hint": "在评论完说说后会自动给此说说点赞",
+        "type": "bool",
+        "default": true
+      },
+      "auto_read_enabled": {
+        "description": "是否开启群聊概率读说说",
+        "type": "bool",
+        "hint": "只在群聊普通消息中按 read_prob 概率触发；私聊不会自动触发。",
+        "default": true
+      },
+      "auto_comment_per_user_daily_limit": {
+        "description": "每天最多自动评论同一个人几次",
+        "type": "int",
+        "hint": "仅限制自动评论（群聊概率触发/定时扫空间），手动 /qq空间_评说说 不受此限制。-1 表示不限制。",
+        "slider": {
+          "min": -1,
+          "max": 10,
+          "step": 1
+        },
+        "default": 3
+      },
+      "auto_comment_per_user_cooldown_minutes": {
+        "description": "自动评论同一个人的最小间隔（分钟）",
+        "type": "int",
+        "hint": "默认 180 分钟，即 3 小时。仅限制自动评论。",
+        "slider": {
+          "min": 0,
+          "max": 1440,
+          "step": 10
+        },
+        "default": 180
+      },
+      "group_show_per_user_daily_limit": {
+        "description": "同一个人在同一个群每天最多展示几张说说卡片",
+        "type": "int",
+        "hint": "同一条说说在同一个群只展示一次；不同群可以各展示一次。-1 表示不限制。",
+        "slider": {
+          "min": -1,
+          "max": 20,
+          "step": 1
+        },
+        "default": 3
+      },
+      "publish_everyone_enabled": {
+        "description": "是否允许普通用户投稿",
+        "type": "bool",
+        "hint": "兼容旧配置字段。当前普通用户投稿统一为：先在自己空间发说说，再由 bot 审核并原生转发；/qq空间_发说说 仅保留给管理员直接发布。",
+        "default": true
+      },
+      "publish_per_user_daily_limit": {
+        "description": "普通用户每天最多成功投稿/转发几条说说",
+        "type": "int",
+        "hint": "仅成功转发后计数；审核失败、接口失败不消耗次数。-1 表示不限制。",
+        "slider": {
+          "min": -1,
+          "max": 10,
+          "step": 1
+        },
+        "default": 1
+      },
+      "publish_with_attribution": {
+        "description": "转发投稿时是否自动标注来源用户",
+        "type": "bool",
+        "hint": "开启后 bot 原生转发时会在转发正文写“【来自 @投稿人 的投稿】”。",
+        "default": true
+      },
+      "publish_with_image": {
+        "description": "旧版直接投稿图片开关（兼容保留）",
+        "type": "bool",
+        "hint": "当前投稿改为原生转发用户自己空间最新说说，本字段主要为兼容旧配置保留。",
+        "default": true
+      },
+      "auto_probe_cooldown_minutes": {
+        "description": "同一用户自动探测空间的最小间隔（分钟）",
+        "type": "int",
+        "hint": "防止 read_prob 较高或群很多时，对同一个人的空间接口反复 F5。只影响群聊概率触发，不影响手动命令和测试触发。",
+        "slider": {
+          "min": 0,
+          "max": 120,
+          "step": 1
+        },
+        "default": 5
+      },
+      "auto_approve_friend_request": {
+        "description": "是否自动同意好友申请",
+        "type": "bool",
+        "hint": "开启后, 当 bot 收到好友申请时会自动 set_friend_add_request(approve=True); 同意后, 如果对方之前在 ignore_users 里, 会自动移除(让下次探测重新判定)。如果你已经启用了其它自动同意好友的插件/配置, 可以关闭本项以避免冲突。",
+        "default": true
+      },
+      "ignore_user_cleanup_on_friend_change": {
+        "description": "成为好友时是否自动清理忽略列表",
+        "type": "bool",
+        "hint": "开启后, 任何时候发现 bot 与某人成为好友(无论是通过自动同意、好友事件还是定时扫描好友列表), 都会把对方QQ从 ignore_users 中移除。这样对方重新开放空间后能正常被探测到。",
+        "default": true
+      },
+      "auto_engage_enabled": {
+        "description": "总开关：是否启用自动评论 + 群聊搬好友说说",
+        "hint": "关闭后，定时自动评论(AutoComment)和群聊概率搬说说(读说说/评说说自动触发)都不执行；但手动指令(我要投稿、/qq空间_看说说、/qq空间_评说说)和管理员操作不受影响。适合只想保留投稿、不想自动打扰/降低风控的场景。",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "cookies_str": {
+    "description": "QQ Cookies",
+    "type": "text",
+    "hint": "选填, 用于维持QQ空间登录态, 留空则自动从 aiocqhttp 客户端获取",
+    "default": ""
+  },
+  "timeout": {
+    "description": "请求超时时间",
+    "type": "int",
+    "hint": "网络请求的超时时间, 单位秒",
+    "slider": {
+      "min": 5,
+      "max": 60,
+      "step": 1
+    },
+    "default": 10
+  }
 }

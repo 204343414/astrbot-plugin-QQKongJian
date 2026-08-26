@@ -102,6 +102,11 @@ class AutoComment(AutoRandomCronTask):
         self.sender = sender
 
     async def do_task(self):
+        # 总开关：关闭则不自动评论(定时扫描空间)。管理员没有豁免——这是纯自动任务，
+        # 没有可判定"当前管理员"的用户上下文。
+        if not bool(getattr(self.cfg.trigger, "auto_engage_enabled", True)):
+            logger.info("[AutoComment] auto_engage_enabled=False，跳过本轮自动评论")
+            return
         try:
             posts = await self.service.query_feeds(
                 pos=0, num=20, no_self=True, no_commented=False

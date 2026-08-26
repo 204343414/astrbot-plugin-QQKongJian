@@ -509,6 +509,11 @@ class QzonePlugin(Star):
         sender_id = event.get_sender_id()
         if self.cfg.source.is_ignore_user(sender_id):
             return
+        # 总开关：关闭则不做群聊概率搬说说；管理员豁免。
+        if not bool(getattr(self.cfg.trigger, "auto_engage_enabled", True)):
+            is_admin = str(sender_id) in self.cfg.admins_id
+            if not is_admin:
+                return
         if not bool(self.cfg.trigger.auto_read_enabled if self.cfg.trigger.auto_read_enabled is not None else True):
             return
         if self.cfg.trigger.read_prob <= 0:

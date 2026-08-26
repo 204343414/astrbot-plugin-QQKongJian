@@ -137,6 +137,9 @@ class TriggerConfig(ConfigNode):
     auto_approve_friend_request: bool
     # 新增：成为好友时清理 ignore_users
     ignore_user_cleanup_on_friend_change: bool
+    # 总开关：是否启用"自动评论 + 群聊搬好友说说"。关闭后自动调度/概率触发
+    # 都不执行，但手动指令(投稿/看说说/评说说)与管理员操作不受影响。
+    auto_engage_enabled: bool
 
 
 class PluginConfig(ConfigNode):
